@@ -1,0 +1,12 @@
+# dependencies & build
+node_modules/
+lib/
+
+# dsh home (settings, credentials, sessions) — carries secrets, never commit
+.dsh-home/
+
+# environment / dev scratch
+.env
+.tmp/
+*.log
+.DS_Store
