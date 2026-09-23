@@ -1,7 +1,7 @@
 /**
  * Minimal HTTP(S) client for the relay API with optional outbound proxy
  * support (CONNECT tunneling), so requests work both direct and behind a
- * local proxy such as http://127.0.0.1:7890.
+ * local HTTP proxy.
  */
 
 import http from 'node:http'

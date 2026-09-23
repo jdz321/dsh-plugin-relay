@@ -10,3 +10,9 @@ lib/
 .tmp/
 *.log
 .DS_Store
+
+# local-only notes: real accounts, machine-specific paths, proxy config
+docs/local.md
+
+# local-only reference screenshots (real account data)
+docs/local-assets/

@@ -10,7 +10,7 @@
 2. **杀进程只按你亲手记下的 PID**。开发端口（默认 3098）上随时可能跑着操作者自己起的实例——不许动。禁止 `pkill -f dsh` / `pkill -f node` 这类模糊匹配。**注意 dsh 是 dev.js 的子进程：只杀父 PID 不会停掉监听端口的 dsh 子进程**，收尾要 `lsof -ti :<port> -sTCP:LISTEN` 按 PID 杀监听者（先 `ps` 确认它确是自己起的 dsh；端口上也可能挂着浏览器/桌面进程的客户端连接，别误杀）。自己起的测试实例一律用其它端口（如 3198/3298）。
 3. **凡手工启动 dsh，命令必须内联 `DSH_HOME=<隔离目录绝对路径>`**。漏了它会回退 `~/.dsh`——等于把操作者自己的 dsh 跑起来。`npm start`（`scripts/dev.js`）已强制锚定仓库 home、**故意忽略**外部 `DSH_HOME`，这是特性不是 bug。dev.js 启动后 dsh 会自动开系统默认浏览器，属已知副作用。
 4. **仓库内的 `.dsh-home/` 若存在，可能是操作者的真实在用配置**（真实账号与真实 key；虽被 gitignore，但不是测试沙盒）。不要「顺手恢复/重置/清洗」它；任何写入前先 Read 全文确认内容；改了什么要明确报告。**测试一律用从零创建的隔离 home，不用真实 home。**
-5. **密钥边界**：中转站访问令牌只存 settings namespace 的 secret 字段（接口层自动脱敏）；API key 明文只写 `.dsh-home/.credentials.yaml`（0600）。任何 HTTP 响应、日志、测试断言、文档、截图、**会话工具输出**都不得出现令牌值或 `sk-` 明文。**测试信息（真实面板地址、账号、key 名称、余额）一律不入 git**——`.gitignore` 已排除 `.dsh-home/`、`.tmp/`、`lib/`、`*.log`，别把临时产物写到其它路径。
+5. **密钥边界**：中转站访问令牌只存 settings namespace 的 secret 字段（接口层自动脱敏）；API key 明文只写 `.dsh-home/.credentials.yaml`（0600）。任何 HTTP 响应、日志、测试断言、文档、截图、**会话工具输出**都不得出现令牌值或 `sk-` 明文。**测试信息（真实面板地址、账号、key 名称、余额）一律不入 git**——`.gitignore` 已排除 `.dsh-home/`、`.tmp/`、`lib/`、`*.log`、`docs/local.md`，别把临时产物写到其它路径。**本机/账号相关的私密信息统一记录在 `docs/local.md`（已 gitignore）**，公开文档不得携带。
 6. **仓库边界**：不修改仓库外的任何文件。未经操作者要求不要 commit。
 7. **外网直连慢或失败**（GitHub / npm / models.dev）时按操作者环境配置代理（`https_proxy` / `http_proxy`）；能力初值查询（↻）经宿主路由代理 models.dev，宿主进程要带代理 env 才拉得到。
 
@@ -82,7 +82,7 @@ DSH_HOME="$PWD/.dsh-home" node_modules/.bin/dsh plugin --profile web add "$PWD"
 
 ### 4.2 credentials-local 的解析层级
 
-`resolve(ref)`：**启动环境变量（只读，最优先）→ 文件 store（`.credentials.yaml`）→ dotenv 回退**。若启动 env 导出了凭据引用同名变量，它只读遮蔽文件值，此时 `set` 会被 `assertUnshadowed` 拒绝（dsh 固定行为）。空串值视同不存在。注意 `.credentials.yaml` 的 `refs:` 段 dsh 会写成 **flow-style**（`{ KEY: value }`），程序化读取别假设 block 风格。
+`resolve(ref)`：**启动环境变量（只读，最优先）→ 文件 store（`.credentials.yaml`）→ dotenv 回退**。若启动 env 导出了凭据引用同名变量，它只读遮蔽文件值，此时 `set` 会被 `assertUnshadowed` 拒绝（dsh 固定行为）。空串值视同不存在。注意 `.credentials.yaml` 的 `refs:` 段 dsh 会写成 **flow-style**（`{ KEY: value }`），程序化读取别假设 block 风格。**程序化编辑 home 内文件必须保住文件权限**：credentials-local 启动与热重载都断言 `.credentials.yaml` 为 0600（`assertOwnerOnly`，非属主只读即拒绝加载、整个 dsh 起不来）；「写临时文件再 rename」会让新文件落入 umask 的 0644——改完必须 `chmod 600`（settings.yaml 同理保持 600）。
 
 ### 4.3 挂载链（谁把插件带起来）与路由建立
 

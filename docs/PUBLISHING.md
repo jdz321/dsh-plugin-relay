@@ -10,6 +10,7 @@
   git remote add origin git@github.com:<owner>/dsh-plugin-relay.git
   git push -u origin main
   ```
+  `<owner>` 与 npm 账号确定后记入 `docs/local.md`（gitignored，本机专属信息）。
 - [ ] 仓库 topics 加上 **`dsh-plugin`**（awesome-dsh-plugin 收录的硬性要求），可再加 `dsh`、`deepseek-harness`、`new-api`。
 - [ ] 仓库 Settings → 开启 Discussions（dsh-market 的评论区直接复用插件的 GitHub Discussions）。
 - [ ] 确认仓库描述与 README 首段一致（会出现在目录列表里）。

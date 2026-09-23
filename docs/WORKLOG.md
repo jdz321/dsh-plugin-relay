@@ -234,3 +234,26 @@
 
 - `tsc --noEmit` 0 error；vitest 57/57；build 成功。
 - 隔离 home + mock 面板浏览器走查：中英两种语言全流程通过；界面截图（mock 虚构数据）存 `assets/` 并嵌入 README。
+
+---
+
+## 2026-09-24（v0.5.0 任务书立项 — 未实施）
+
+操作者下达七项改进需求（能力知识库与匹配规则、移除默认模型、账户行精简、key 增删改、数据看板、使用日志、UI 参照），本阶段只做实证调研与写任务书，不实施。交付 **`docs/SPEC-0.5.0.md`**。
+
+### 为任务书核实的关键事实（实证面板只读探测 + 上游源码）
+
+- **token CRUD**：`POST /api/token/` 该 fork 必填分组；`PUT /api/token/` 必须带 id；`DELETE /api/token/{id}` 存在；列表为 `{page,page_size,total,items}`。上游源码确认字段表与「整对象更新」语义。
+- **日志**：`/api/log/self` 条目带独立列 `cache_read_tokens / cache_creation_tokens / reasoning_tokens / reasoning_effort`，首字耗时在 `other` JSON 串的 `frt`（毫秒）；分页同 token 列表。
+- **stat**：`/api/log/self/stat` 支持可选 `start/end_timestamp` 窗口（不带参数 = 全量口径，与面板「累计消耗」对账一致）。
+- **看板**：`/api/data/self` 返回裸数组小时桶 `{model_name, created_at, token_used, count, quota}`；面板只保留近期桶（7 天窗口实测稀疏）；`/api/user/self` 有 `quota / used_quota / request_count`，无累计 tokens 字段。
+- **模型 id 匹配**：实证面板 78 个 id 中 71 个在 models.dev 精确命中；大小写归一化零增益；7 个未命中全是变体后缀型（`-tiered`、`-high`、`-0902` 日期、渠道命名）。规则定为「精确 → 剥一层（至多两层）尾部变体后缀再精确 → 放弃」。
+- **models.dev** 条目含 `limit.context / limit.output`，可作知识库「默认上下文窗口」默认值来源。
+
+### 决策要点（写进 SPEC）
+
+- 能力真源移入插件 namespace（知识库 + 按 id 覆盖），路由条目能力字段变为派生状态；同步只写插件持有配置的字段，无配置 id 的手工字段不被触碰。
+- 创建 key 的明文边界：`data.key` 宿主剥离、绝不回传浏览器；提供「创建并设为生效」走服务端凭据写入。
+- 看板图表手写 SVG，零新增依赖；数据稀疏按常态空态设计。
+- 默认模型管理整体移除（写入、决策、状态行、文案），`agent-default-model` namespace 本身不动。
+- 真实账号写路径（key CRUD 验收）限定一次性 `dsh-temp-` 临时 key 三步闭环，既有 key 不碰。
