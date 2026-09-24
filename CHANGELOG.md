@@ -3,6 +3,24 @@
 All notable changes to this project are documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows [SemVer](https://semver.org/).
 
+## [0.5.0] - 2026-09-24
+
+### Added
+
+- **Model capability knowledge base**: capability config (input modalities, reasoning, default context window) now lives in the plugin's own settings namespace, keyed by canonical model name — it never changes with key switches. Catalog syncs apply it to the route entries by matching rule: exact panel id → one-or-two trailing variant-suffix strips (marked approximate) → give up. Per-panel-id overrides take precedence over the knowledge base; ids without plugin config are left untouched, so manual edits from the official Models page survive.
+- **Default context window**: capability entries and the models.dev lookup now cover `limit.context`, written to the route entries' `contextWindow` (replacing the heuristic value when configured).
+- **Key management on the API keys tab**: create, edit (name / group / quota / expiry / enable-disable), and delete keys — all through the panel's management API. Key material never crosses to the browser: creation responses are stripped server-side, and "create and set active" runs the regular switch flow so the secret only enters the credential store. Deleting the active key warns.
+- **Dashboard tab**: balance / today / totals cards plus a stacked per-model usage chart (spend vs tokens) of the last 7 days, rendered with recharts (bundled into the client artifact; react stays external). Sparse panel data renders as a readable empty state.
+- **Usage logs tab**: panel request logs with a statistics header (usage / RPM / TPM over the filter window), time / model / key / group filters applied on query, and an eight-column table including cache and reasoning token detail and first-response time (parsed from the panel's `other` JSON blob, fault-tolerant).
+- `npm start -- --no-open` boots the dev instance without opening the system browser.
+
+### Changed
+
+- **The plugin no longer manages a default model.** Switching keys no longer writes `agent-default-model` (that namespace stays the user's own business in dsh); status lines and success messages drop the default-model clause.
+- The account line on the API keys tab is reduced to username + balance; group and ratio stay on each key row where they belong.
+- Capability tab restructured into *Knowledge base* + *Platform models* sections with source badges (override / knowledge base / approximate / unconfigured).
+- The client bundle resolves `process.env.NODE_ENV` at build time (the browser module table has no `process`); `react-dom` joins the external react-family list.
+
 ## [0.4.0] - 2026-09-21
 
 ### Added

@@ -257,3 +257,49 @@
 - 看板图表手写 SVG，零新增依赖；数据稀疏按常态空态设计。
 - 默认模型管理整体移除（写入、决策、状态行、文案），`agent-default-model` namespace 本身不动。
 - 真实账号写路径（key CRUD 验收）限定一次性 `dsh-temp-` 临时 key 三步闭环，既有 key 不碰。
+
+---
+
+## 2026-09-24/25（v0.5.0 — 能力知识库与匹配规则、移除默认模型、key 增删改、看板与日志、--no-open）
+
+按 SPEC-0.5.0 无人值守实施七项需求。模块布局新增：`src/knowledge.ts`（知识库/覆盖类型、校验、匹配规则、落点重放的纯函数）、`src/usage.ts`（日志整形 + 看板按天聚合）；客户端新增 `dashboard.tsx`（recharts）与 `logs.tsx`，能力页重写为「知识库 + 平台模型」两段。
+
+### 1. R1 能力语义重构
+
+- 能力真源移入 `relay` namespace 的 `capabilityCatalog` / `capabilityOverrides`（schemastery dict，schema 必须声明否则 resolved 值读不回）；路由条目能力字段变为派生状态，`syncRouteCatalog` 与新的 `replayRouteCapabilities` 在一次修订守卫写内按「覆盖 → 知识库（剥后缀=近似）→ 不触碰」重放，只写插件持有配置的字段。
+- v0.4.0 的 `applyCapabilityUpdates`/`saveCapabilities`/`capabilityOf` 整体删除（路由级手工增删模型不再提供，知识库承担该职责）。
+- 匹配规则 `matchCatalogName`：精确 → 剥一至两层尾部变体段（标 approximate）→ 放弃；无模糊/大小写归一化。
+
+### 2. R4 key 增删改的三个关键边界
+
+- **明文剥离**：`createToken` 只返回 `{id,name}`；「创建并设为生效」在服务端走常规切换流程，明文只进凭据文件。
+- **上游 UpdateToken 语义（联网读源码实证）**：`PUT /api/token/` 的 **status 只在 `?status_only=true` 时生效**，普通 PUT 更新 name/expired_time/remain_quota/unlimited_quota/model_limits*/allow_ips/group。初版把 status 放普通 PUT 里，真实面板实测「禁用不生效」——查上游 controller/token.go 后拆成两段写（普通编辑 + 可选 status_only PUT），mock 同步镜像该语义。
+- 编辑必须以列表原始记录为基合并回传（整对象更新语义）。
+
+### 3. R5/R6 看板与日志
+
+- 宿主聚合：`/dashboard` 一次返回余额卡片 + 近 N 天按天按模型桶（hour 桶按本地日聚合、¥ 换算在宿主侧完成）；`/logs`、`/logs-stat`、`/logs-meta`（筛选下拉数据源）。
+- 图表选 recharts（spec 基线）：**client 产物 2.21MB**（recharts + d3 家族全部打进产物；react/jsx-runtime/react-dom 外置——外壳 PLATFORM_MODULES 实测供给 react-dom）。两个构建期坑：① 浏览器模块表无 `process`，recharts 的 NODE_ENV 守卫需 tsdown `define` 消解，否则运行时报 `process is not defined`；② react-dom 外置后 react-is 仍需打包（基座无此键）。
+
+### 4. R8 --no-open
+
+`scripts/dev.js` 抽出 `parseDevArgs`（可单测），`--no-open` 透传 dsh web；AGENTS/README 开发小节同步。
+
+### 5. 浏览器验收抓出的三个真 bug（全部修复 + 回归测试）
+
+1. **空壳回写**：重放路径把 resolved 值里 schemastery 具体化的 `input: []` 原样写回 settings.yaml（AGENTS §4.1 教训的新变体）——写边界统一 `cleanModelEntry`。
+2. **字典删除失效**：`settings.update` 深合并语义下，提交空 `capabilityOverrides:{}` 无法删除已有条目——改用 `mutate` 路径级 set 整体替换两个字典。
+3. 重命名知识库行后编辑态丢失（editingName 存旧名）；知识库空态误复 intro 文案。
+
+### 6. 验收证据（全部隔离环境 + 只读真实对账）
+
+- 单测 96/96（匹配规则/落点重放/空壳清洗/日志整形/看板聚合/明文剥离/启停双模式/dev 旗标）；typecheck 0 error；build-shape 断言 client 的 bare require 只剩 react 系。
+- 隔离 home（从零 add）+ mock 面板：中英双语六页签全走查；key 创建→编辑→启停→删除（含生效 key 删除警示）闭环；能力页知识库新增 + ↻ 拉取（含 contextWindow）+ 保存落盘精确断言（capabilityCatalog / 路由条目 input/reasoningEfforts/contextWindow）；覆盖编辑与清除；key 切换后知识库存活并重放到新目录；看板卡片与堆叠图口径切换；日志筛选/分页/`other` 容错。
+- 真实账号只读对账：self/stat（窗口与全量）/日志字段/稀疏桶全部与面板一致，日志无 key 材料；匹配规则实测 82 个面板 id 命中 79（75 精确 + 4 近似），未命中 3 个全为渠道命名特有族。
+- 真实面板写路径：一次性 `dsh-temp-` 前缀临时 key 走 创建（空分组被拒）/编辑（改名/减额/设过期/禁用）/删除 闭环，面板无残留；既有 key 未触碰。
+- 截图 12 张（六页签 × 中英，mock 数据）重拍并更新 screenshots.json（6 张英文）。
+
+### 7. 遗留
+
+- v0.4.0 直接写在路由条目上的旧能力字段不会自动迁移进知识库（按 spec 语义保持原样，页面文案已说明）；用户可在能力页对相应 id 建覆盖接管。
+- 看板图表未做 minify（client 2.21MB）；如需可后续加 tsdown minify（改动 build-shape 断言需同步）。

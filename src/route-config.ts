@@ -1,22 +1,24 @@
 /**
  * Reads and writes of the pi-ai route profile (`llm-pi-ai.providers.<route>`).
  *
- * The capability Tab, the official Models settings page, and this plugin's
- * catalog sync all edit the same profile. The invariant every writer here
- * honors: only touch the fields you own, and do read-modify-write on the
- * `models` ARRAY under a settings revision guard with bounded retry — the
- * write queue serializes writes, not the read before them, so without the
- * guard a stale read could clobber a concurrent writer's fields (settings
- * update merges objects but REPLACES arrays).
+ * The official Models settings page, and this plugin's catalog sync, edit the
+ * same profile. The invariant every writer here honors: only touch the fields
+ * you own, and do read-modify-write on the `models` ARRAY under a settings
+ * revision guard with bounded retry — the write queue serializes writes, not
+ * the read before them, so without the guard a stale read could clobber a
+ * concurrent writer's fields (settings update merges objects but REPLACES
+ * arrays).
  *
- * Capability config lives on the models entries themselves (`input`,
- * `reasoningEfforts`): `modelOverrides` is rejected by pi-ai beside a
- * `models` list and on routes its installed catalog does not describe, and a
- * relay route is always both.
+ * Capability config on the models entries (`input`, `reasoningEfforts`,
+ * `contextWindow`) is derived state since v0.5.0: its persistent sources are
+ * the plugin's knowledge base and per-id overrides (see knowledge.ts), and
+ * every catalog sync or capability save replays those sources over the
+ * entries. Entries no plugin config covers are left untouched, so manual
+ * edits from the official Models page survive.
  */
 
 import { cleanModelEntry, mergeCatalog } from './catalog.js'
-import { EFFORT_LEVELS } from './constants.js'
+import { applyDerivedCapabilities, type KnowledgeConfig } from './knowledge.js'
 import { routeProfileFields, type Section } from './plan.js'
 import type { PiAiSection, RouteModelEntry, RouteProfile, SettingsConflictError, SettingsPathOp, SettingsService } from './types.js'
 
@@ -47,105 +49,6 @@ export function isSettingsConflict(err: unknown): err is SettingsConflictError {
 }
 
 /**
- * The capability fields of one stored entry as the UI sees them: absent or
- * empty arrays collapse to null ("inherit"), reasoning efforts keep
- * false/dict and lose the implicit `off` bookkeeping.
- */
-export function capabilityOf(entry: RouteModelEntry): { input: string[] | null, reasoning: false | string[] | null } {
-  const input = Array.isArray(entry.input) && entry.input.length ? [...entry.input] : null
-  const efforts = entry.reasoningEfforts
-  let reasoning: false | string[] | null
-  if (efforts === false) reasoning = false
-  else if (efforts && typeof efforts === 'object') {
-    reasoning = Object.keys(efforts).filter((level) => level !== 'off')
-  } else reasoning = null
-  return { input, reasoning }
-}
-
-/** One submitted capability change from the browser. */
-export interface CapabilityUpdate {
-  id: string
-  /** Selected modalities; empty = inherit the route default. */
-  input?: string[]
-  /** `false` = mark non-reasoning; levels = reasoning with those efforts. */
-  reasoning?: false | { levels: string[] } | null
-  /** Strip the entry's capability fields (clear the override). */
-  removeCapability?: boolean
-  /** Drop the entry from the route entirely (manual models only). */
-  removeModel?: boolean
-}
-
-/** Validate levels; throws with a user-facing message on bad input. */
-function assertLevels(levels: readonly string[]): void {
-  if (!levels.length) throw new Error('推理档位至少选择一个（或关闭推理）')
-  for (const level of levels) {
-    if (!(EFFORT_LEVELS as readonly string[]).includes(level)) {
-      throw new Error(`未知推理档位「${level}」`)
-    }
-  }
-}
-
-/** The reasoningEfforts dict for chosen levels: level name as wire value, off pinned null. */
-export function reasoningEffortsFor(levels: readonly string[]): Record<string, string | null> {
-  const dict: Record<string, string | null> = { off: null }
-  for (const level of levels) dict[level] = level
-  return dict
-}
-
-/**
- * Apply capability updates to a models array. Pure; throws on invalid input.
- * Manual models (ids without a stored entry) are appended, which is how the
- * capability Tab's 「添加」 grows the route.
- */
-export function applyCapabilityUpdates(models: readonly RouteModelEntry[], updates: readonly CapabilityUpdate[]): RouteModelEntry[] {
-  const byId = new Map(models.map((entry) => [String(entry.id), entry]))
-  const addedIds = new Set<string>()
-  for (const update of updates) {
-    const id = String(update.id ?? '').trim()
-    if (!id) throw new Error('模型 id 不能为空')
-    const existing = byId.get(id)
-    if (update.removeModel) {
-      if (!existing) throw new Error(`模型「${id}」不在当前目录中，无法删除`)
-      byId.delete(id)
-      continue
-    }
-    let next: RouteModelEntry
-    if (existing) {
-      next = { ...cleanModelEntry(existing) }
-    } else {
-      if (update.removeCapability) throw new Error(`模型「${id}」没有可清除的能力配置`)
-      next = { id, name: id }
-      addedIds.add(id)
-    }
-    byId.set(id, next)
-    if (update.removeCapability) {
-      delete next.input
-      delete next.reasoningEfforts
-      continue
-    }
-    if (update.input !== undefined) {
-      const input = update.input.filter((m) => m === 'text' || m === 'image')
-      if (input.length) next.input = [...new Set(input)]
-      else delete next.input
-    }
-    if (update.reasoning !== undefined) {
-      if (update.reasoning === null) {
-        delete next.reasoningEfforts
-      } else if (update.reasoning === false) {
-        next.reasoningEfforts = false
-      } else {
-        const levels = update.reasoning.levels ?? []
-        assertLevels(levels)
-        next.reasoningEfforts = reasoningEffortsFor(levels)
-      }
-    }
-  }
-  const kept = [...byId.values()].filter((entry) => !addedIds.has(String(entry.id)))
-  const added = [...addedIds].map((id) => byId.get(id)!)!
-  return [...kept, ...added].map(cleanModelEntry)
-}
-
-/**
  * Read the route profile under the current revision, let the caller build
  * path ops from it, and write with a revision guard, retrying the whole
  * read-build-write cycle while the guard reports a lost race.
@@ -172,36 +75,15 @@ async function guardedMutate(
 }
 
 /**
- * Apply one save from the capability Tab: merge the submitted capability
- * fields into the stored entries, leaving every other field (and every other
- * writer's fields) untouched. Fails when the route does not exist yet —
- * capabilities are an overlay on a synced catalog, and a route materializes
- * on first key use.
- */
-export async function saveCapabilities(settings: SettingsService, route: string, updates: readonly CapabilityUpdate[]): Promise<RouteModelEntry[]> {
-  if (!updates.length) return storedRouteModels(settings, route)
-  if (!storedRouteProfile(settings, route)) {
-    throw new Error('中转站路由尚未建立：请先在 API Keys 页选择一个 key（同步模型目录后即可配置能力）')
-  }
-  let result: RouteModelEntry[] = []
-  await guardedMutate(settings, (current) => {
-    const models = current.providers?.[route]?.models ?? []
-    result = applyCapabilityUpdates(models, updates)
-    return [{ op: 'set', path: ['providers', route, 'models'], value: result }]
-  })
-  return result
-}
-
-/**
  * Reconcile the route's catalog with the ids the active key can call:
- * surviving ids keep their stored fields, new ids join, gone ids drop.
- * Creates the route (with its connection-derived profile fields) when absent.
- * Resolves with the models stored after the call and whether a write happened.
+ * surviving ids keep their stored fields, new ids join, gone ids drop; then
+ * the knowledge base / override rules replay over the result. Creates the
+ * route (with its connection-derived profile fields) when absent.
  */
-export async function syncRouteCatalog(settings: SettingsService, section: Section, ids: readonly string[]): Promise<{ models: RouteModelEntry[], written: boolean }> {
+export async function syncRouteCatalog(settings: SettingsService, section: Section, ids: readonly string[], knowledge: KnowledgeConfig = { capabilityCatalog: {}, capabilityOverrides: {} }): Promise<{ models: RouteModelEntry[], written: boolean }> {
   const profileFields = routeProfileFields(section)
   if (!storedRouteProfile(settings, section.route)) {
-    const models = mergeCatalog(ids, undefined)
+    const models = applyDerivedCapabilities(mergeCatalog(ids, undefined), knowledge).map(cleanModelEntry)
     // Create path: a plain update suffices — there is nothing to clobber.
     await settings.update('llm-pi-ai', {
       providers: { [section.route]: { ...profileFields, models } },
@@ -212,7 +94,9 @@ export async function syncRouteCatalog(settings: SettingsService, section: Secti
   await guardedMutate(settings, (current) => {
     const profile = current.providers?.[section.route]
     const stored = profile?.models ?? []
-    const models = mergeCatalog(ids, stored)
+    // stored entries come from the RESOLVED value: schemastery materializes
+    // `input: []` shells that must be stripped before they are written back.
+    const models = applyDerivedCapabilities(mergeCatalog(ids, stored), knowledge).map(cleanModelEntry)
     const unchanged = JSON.stringify(models) === JSON.stringify(stored.map(cleanModelEntry))
     const staleFields = CONNECTION_FIELDS.filter((key) => {
       const value = profile?.[key]
@@ -229,6 +113,23 @@ export async function syncRouteCatalog(settings: SettingsService, section: Secti
     return ops
   })
   return { models: storedRouteModels(settings, section.route), written: wrote }
+}
+
+/**
+ * Re-apply the knowledge base / override rules to the route's stored entries
+ * after the plugin's capability config changed. A revision-guarded no-op
+ * write when nothing derives differently.
+ */
+export async function replayRouteCapabilities(settings: SettingsService, route: string, knowledge: KnowledgeConfig): Promise<RouteModelEntry[]> {
+  if (!storedRouteProfile(settings, route)) return []
+  await guardedMutate(settings, (current) => {
+    const stored = current.providers?.[route]?.models ?? []
+    // same resolved-value shells as syncRouteCatalog: strip before writing.
+    const next = applyDerivedCapabilities(stored, knowledge).map(cleanModelEntry)
+    const unchanged = JSON.stringify(next) === JSON.stringify(stored.map(cleanModelEntry))
+    return unchanged ? [] : [{ op: 'set', path: ['providers', route, 'models'], value: next }]
+  })
+  return storedRouteModels(settings, route)
 }
 
 /**

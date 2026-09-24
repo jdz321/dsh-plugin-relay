@@ -71,4 +71,52 @@ export const cssText = `
 .${CSS_PREFIX}_switchKnob{position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:8px;background:var(--dsw-alias-label-primary-foreground);transition:left .15s}
 .${CSS_PREFIX}_switchOn .${CSS_PREFIX}_switchKnob{left:18px}
 .${CSS_PREFIX}_capHint{color:var(--dsw-alias-label-tertiary);font-size:11px;line-height:16px}
+.${CSS_PREFIX}_capBadge{border:.5px solid var(--dsw-alias-border-l3);color:var(--dsw-alias-label-tertiary);border-radius:4px;flex:none;padding:1px 6px;font-size:11px;line-height:16px;overflow-wrap:anywhere}
+.${CSS_PREFIX}_capBadgeOverride{color:var(--dsw-alias-state-warning-primary,#c47f17);border-color:var(--dsw-alias-state-warning-primary,#c47f17)}
+.${CSS_PREFIX}_capBadgeCatalog{color:var(--dsw-alias-state-success-primary);border-color:var(--dsw-alias-state-success-primary)}
+.${CSS_PREFIX}_capBadgeApprox{color:var(--dsw-alias-label-secondary);border-color:var(--dsw-alias-brand-primary)}
+.${CSS_PREFIX}_capSection{flex-direction:column;gap:8px;display:flex}
+.${CSS_PREFIX}_capSectionTitle{color:var(--dsw-alias-label-secondary);font-size:12px;font-weight:600;line-height:18px;text-transform:uppercase;letter-spacing:.04em}
+.${CSS_PREFIX}_capContext{width:140px;flex:none}
+.${CSS_PREFIX}_capFieldRow{align-items:center;gap:8px;flex-wrap:wrap;display:flex}
+.${CSS_PREFIX}_kbName{width:200px;flex:none}
+
+.${CSS_PREFIX}_form{border:.5px dashed var(--dsw-alias-border-l3);border-radius:10px;flex-direction:column;gap:10px;padding:10px 12px;display:flex}
+.${CSS_PREFIX}_formGrid{gap:10px 16px;display:grid;grid-template-columns:1fr 1fr}
+.${CSS_PREFIX}_formSpan2{grid-column:span 2}
+.${CSS_PREFIX}_checkRow{align-items:center;gap:6px;display:flex}
+.${CSS_PREFIX}_checkbox{accent-color:var(--dsw-alias-brand-primary);width:14px;height:14px;margin:0}
+.${CSS_PREFIX}_radioRow{align-items:center;gap:12px;flex-wrap:wrap;display:flex}
+.${CSS_PREFIX}_radio{accent-color:var(--dsw-alias-brand-primary);width:13px;height:13px;margin:0}
+.${CSS_PREFIX}_select{box-sizing:border-box;border:.5px solid var(--dsw-alias-border-l4);width:100%;height:32px;font:inherit;background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary);border-radius:8px;padding:0 8px;font-size:13px}
+.${CSS_PREFIX}_selectSm{height:28px;font-size:12px;width:auto}
+.${CSS_PREFIX}_select:focus{border-color:var(--dsw-alias-brand-primary);outline:none}
+.${CSS_PREFIX}_formActions{justify-content:flex-end;gap:8px;align-items:center;display:flex}
+
+.${CSS_PREFIX}_dashCards{gap:10px;display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr))}
+.${CSS_PREFIX}_dashCard{border:.5px solid var(--dsw-alias-border-l4);border-radius:10px;flex-direction:column;gap:4px;padding:10px 12px;display:flex}
+.${CSS_PREFIX}_dashLabel{color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:18px}
+.${CSS_PREFIX}_dashValue{color:var(--dsw-alias-label-primary);font-size:18px;font-weight:600;line-height:26px;overflow-wrap:anywhere}
+.${CSS_PREFIX}_dashSub{color:var(--dsw-alias-label-tertiary);font-size:11px;line-height:16px}
+.${CSS_PREFIX}_dashChart{border:.5px solid var(--dsw-alias-border-l4);border-radius:10px;flex-direction:column;gap:8px;padding:10px 12px;display:flex}
+.${CSS_PREFIX}_dashChartHead{align-items:center;justify-content:space-between;gap:8px;display:flex}
+.${CSS_PREFIX}_chart{width:100%;font-size:11px}
+.${CSS_PREFIX}_chart .recharts-text{fill:var(--dsw-alias-label-tertiary);font-size:10px}
+.${CSS_PREFIX}_chart .recharts-default-legend{font-size:11px}
+
+.${CSS_PREFIX}_statBar{align-items:baseline;gap:16px;flex-wrap:wrap;display:flex}
+.${CSS_PREFIX}_statItem{color:var(--dsw-alias-label-tertiary);font-size:12px}
+.${CSS_PREFIX}_statValue{color:var(--dsw-alias-label-primary);font-weight:600;font-size:14px}
+.${CSS_PREFIX}_filters{align-items:flex-end;gap:10px;flex-wrap:wrap;display:flex}
+.${CSS_PREFIX}_filterField{flex-direction:column;gap:4px;min-width:140px;flex:1 1 140px;display:flex}
+.${CSS_PREFIX}_filterFieldWide{flex:2 1 240px}
+.${CSS_PREFIX}_logTable{border:.5px solid var(--dsw-alias-border-l4);border-radius:10px;overflow:hidden;font-size:12px}
+.${CSS_PREFIX}_logTable table{border-collapse:collapse;width:100%;table-layout:fixed}
+.${CSS_PREFIX}_logTable th{color:var(--dsw-alias-label-tertiary);font-size:11px;font-weight:500;text-align:left;padding:6px 8px;border-bottom:.5px solid var(--dsw-alias-border-l4);background:var(--dsw-alias-interactive-bg-hover);overflow-wrap:anywhere}
+.${CSS_PREFIX}_logTable td{color:var(--dsw-alias-label-primary);padding:7px 8px;border-bottom:.5px solid var(--dsw-alias-border-l4);vertical-align:top;overflow-wrap:anywhere}
+.${CSS_PREFIX}_logTable tr:last-child td{border-bottom:none}
+.${CSS_PREFIX}_logMono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px}
+.${CSS_PREFIX}_logSub{color:var(--dsw-alias-label-tertiary);font-size:11px;line-height:15px}
+.${CSS_PREFIX}_pagination{align-items:center;gap:10px;justify-content:flex-end;padding:8px 4px 0;display:flex}
+.${CSS_PREFIX}_pageInfo{color:var(--dsw-alias-label-tertiary);font-size:12px}
 `

@@ -2,27 +2,52 @@
  * Host entry for dsh-plugin-relay.
  *
  * Owns the `relay` settings namespace (relay base URL, access token, user
- * id, active key metadata) and serves the /api/relay/* fetch routes the web
- * settings page talks to: connection state, key browsing/switching, per-key
- * model pricing with catalog sync, per-model capability configuration (the
- * same `llm-pi-ai.providers.<route>.models` entries the official Models page
- * edits), and models.dev capability lookups. Works with any new-api family
+ * id, active key metadata, capability knowledge base, per-id capability
+ * overrides) and serves the /api/relay/* fetch routes the web settings page
+ * talks to: connection state, key browsing / switching / CRUD, per-key model
+ * pricing with catalog sync, the capability knowledge base with route
+ * replay, usage dashboard, and usage logs. Works with any new-api family
  * relay panel.
  */
 
 import Schema from '@deepseek-ai/schemastery'
 
 import { ModelsDevClient } from './capabilities.js'
-import { mergeCatalog } from './catalog.js'
 import { CLIENT_MODULE_ID, KEY_REF_DEFAULT, NAMESPACE, PLUGIN_NAME, ROUTE_DEFAULT } from './constants.js'
 import { envProxy } from './http.js'
-import { formatQuota, keySummary, missingSetup, planSwitch, relayFromSection, resolveSection, routeProfileFields, SECTION_DEFAULTS, type Section } from './plan.js'
+import {
+  normalizeCapabilityEntry,
+  validateCapabilityEntry,
+  deriveCapabilityFor,
+  normalizeKnowledgeConfig,
+  type CatalogEntry,
+  type KnowledgeConfig,
+} from './knowledge.js'
+import {
+  formatQuota,
+  keySummary,
+  missingSetup,
+  planSwitch,
+  relayFromSection,
+  resolveSection,
+  SECTION_DEFAULTS,
+  type Section,
+  type SwitchPlan,
+} from './plan.js'
 import { groupRatioOf, priceEntry } from './pricing.js'
-import { capabilityOf, ensureRouteProfile, saveCapabilities, storedRouteModels, storedRouteProfile, syncRouteCatalog, type CapabilityUpdate } from './route-config.js'
+import { ensureRouteProfile, replayRouteCapabilities, storedRouteProfile, syncRouteCatalog } from './route-config.js'
 import type { CredentialsService, HostContext, SchemaType, SettingsService } from './types.js'
+import { aggregateDailyBuckets, buildDashboardView, normalizeLog, startOfDaysAgo, startOfToday } from './usage.js'
 
 /** Stable Cordis plugin name. */
 export const name = PLUGIN_NAME
+
+/** Capability knowledge entry schema (both dicts share the entry shape). */
+const CapabilityEntrySchema = Schema.object({
+  input: Schema.array(Schema.string()),
+  reasoning: Schema.union([Schema.boolean(), Schema.array(Schema.string())]),
+  contextWindow: Schema.number(),
+})
 
 /** Composition schema; resolved values are the settings `base` layer. */
 export interface PluginConfig {
@@ -33,6 +58,8 @@ export interface PluginConfig {
   keyRef: string
   route: string
   selectedKeyName: string
+  capabilityCatalog: Record<string, unknown>
+  capabilityOverrides: Record<string, unknown>
 }
 
 const configShape = {
@@ -43,6 +70,8 @@ const configShape = {
   keyRef: Schema.string().default(SECTION_DEFAULTS.keyRef),
   route: Schema.string().default(SECTION_DEFAULTS.route),
   selectedKeyName: Schema.string().default(SECTION_DEFAULTS.selectedKeyName),
+  capabilityCatalog: Schema.dict(CapabilityEntrySchema),
+  capabilityOverrides: Schema.dict(CapabilityEntrySchema),
 }
 
 export const Config: SchemaType<PluginConfig> = Schema.object(configShape) as SchemaType<PluginConfig>
@@ -91,6 +120,11 @@ function currentSection(): Section {
   return resolveSection(safeGet(NAMESPACE) as Partial<Section> | undefined)
 }
 
+/** The plugin-owned capability config (knowledge base + overrides). */
+function currentKnowledge(): KnowledgeConfig {
+  return normalizeKnowledgeConfig(safeGet(NAMESPACE))
+}
+
 /** JSON response helper (fetch routes answer with standard Response). */
 function json(data: unknown, status = 200): Response {
   return Response.json(data, { status })
@@ -119,6 +153,10 @@ function groupOf(self: Record<string, unknown> | null): string {
   return typeof self?.group === 'string' ? self.group : ''
 }
 
+function isObj(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+}
+
 /** JSON-safe view of the integration state for the settings page. */
 async function buildState(section: Section) {
   let credentialConfigured = false
@@ -130,7 +168,6 @@ async function buildState(section: Section) {
   const llmSection = safeGet('llm-pi-ai') as { providers?: Record<string, { models?: unknown[] }> } | undefined
   const routeConfig = llmSection?.providers?.[section.route]
   const models = Array.isArray(routeConfig?.models) ? routeConfig.models : []
-  const defaultModel = safeGet('agent-default-model') as { provider?: string, model?: string } | undefined
   return {
     clientModuleId: CLIENT_MODULE_ID,
     baseUrl: section.baseUrl,
@@ -143,7 +180,6 @@ async function buildState(section: Section) {
     selectedKeyName: section.selectedKeyName || '',
     credentialConfigured,
     modelCount: models.length,
-    defaultModel: defaultModel?.provider === section.route ? (defaultModel.model ?? null) : null,
     namespaceRegistered: safeGet(NAMESPACE) !== undefined,
     settingsRegistrationError,
     settingsReadError,
@@ -166,32 +202,70 @@ function scheduleRouteMirror(): void {
   }, 300)
 }
 
-/** The /keys response: account line plus per-key metadata, never key material. */
+/** The /keys response: account line, per-key metadata, usable groups — never key material. */
 async function keysResponse(): Promise<Response> {
   const section = currentSection()
   const missing = missingSetup(section)
-  if (missing) return json({ ok: false, error: `missing:${missing}`, keys: [] }, 400)
+  if (missing) return json({ ok: false, error: `missing:${missing}`, keys: [], groups: {} }, 400)
   const relay = relayFromSection(section)
   const [tokens, self, pricing] = await Promise.all([
     relay.listTokens(),
     relay.self().catch(() => null),
     relay.pricing(),
   ])
+  const groups: Record<string, string> = {}
+  if (pricing) {
+    for (const [name, description] of Object.entries(pricing.usableGroup)) {
+      if (name.trim()) groups[name] = String(description ?? '')
+    }
+  }
   return json({
     ok: true,
     account: self
       ? {
           username: self.username ?? String(self.id ?? ''),
-          group: groupOf(self),
           quotaCny: formatQuota(self.quota as number | undefined),
-          groupRatio: groupRatioOf(pricing, groupOf(self)),
         }
       : null,
+    groups,
     keys: tokens.map((t) => keySummary(t, {
       selectedName: section.selectedKeyName,
       groupRatio: groupRatioOf(pricing, t.group || groupOf(self)),
     })),
   })
+}
+
+/** Apply a planned switch: credential write, route sync (with capability replay), metadata. */
+async function performSwitch(section: Section, idOrName: string, noModels: boolean): Promise<{ plan: SwitchPlan, warnings: string[] }> {
+  if (!settingsService || !credentialsService) throw new Error('services unavailable')
+  const relay = relayFromSection(section)
+  const plan = await planSwitch({ relay, section, idOrName, noModels })
+  const warnings: string[] = []
+  if (!plan.token.enabled) {
+    warnings.push(`「${plan.token.name}」当前处于禁用状态，请求会被中转站拒绝；请先到中转站控制台启用它。`)
+  }
+  await credentialsService.set(section.keyRef, plan.token.key)
+  // One guarded write carries the connection fields, the merged catalog, and
+  // the capability fields derived from the knowledge base / overrides.
+  if (plan.ids) {
+    try {
+      await syncRouteCatalog(settingsService, section, plan.ids, currentKnowledge())
+    } catch (err) {
+      warnings.push(`模型列表写入被 llm-pi-ai 设置校验拒绝: ${err instanceof Error ? err.message : String(err)}`)
+    }
+  } else {
+    try {
+      await ensureRouteProfile(settingsService, section)
+    } catch {
+      /* connection mirror is cosmetic */
+    }
+  }
+  try {
+    await settingsService.update(NAMESPACE, { selectedKeyName: plan.token.name })
+  } catch {
+    /* cosmetic only */
+  }
+  return { plan, warnings }
 }
 
 /** Mount one fetch route with the standard wrapper. dsh registers ONE route per path, so a path may need to serve several methods. */
@@ -202,6 +276,59 @@ function route(connection: { registerFetchRoute(owner: HostContext, spec: Record
     requestBody: 'buffered',
     fetch: guarded(handler),
   })
+}
+
+/** Validate one submitted capability dict entry after normalization. */
+function checkedEntry(raw: unknown, label: string): CatalogEntry {
+  const entry = normalizeCapabilityEntry(raw)
+  if (!entry) throw new Error(`${label}: 至少配置一项能力字段`)
+  validateCapabilityEntry(entry, label)
+  return entry
+}
+
+/** Build the per-model capability view the capability tab renders. */
+function capabilityModelsView(routeName: string) {
+  const profile = storedRouteProfile(settingsService!, routeName)
+  const entries = Array.isArray(profile?.models) ? profile!.models ?? [] : []
+  const knowledge = currentKnowledge()
+  return entries.map((entry) => {
+    const derived = deriveCapabilityFor(String(entry.id), knowledge)
+    return {
+      id: String(entry.id),
+      input: derived.input ?? null,
+      reasoning: derived.reasoning ?? null,
+      contextWindow: derived.contextWindow ?? null,
+      source: derived.source,
+      catalogName: derived.catalogName ?? null,
+    }
+  })
+}
+
+/** Persist submitted knowledge dicts, then replay the rules onto the route. */
+async function saveKnowledgeAndReplay(routeName: string, body: Record<string, unknown>) {
+  const rawCatalog = isObj(body.catalog) ? body.catalog : {}
+  const rawOverrides = isObj(body.overrides) ? body.overrides : {}
+  const catalog: Record<string, CatalogEntry> = {}
+  for (const [name, raw] of Object.entries(rawCatalog)) {
+    const key = name.trim()
+    if (!key) throw new Error('知识库模型名不能为空')
+    catalog[key] = checkedEntry(raw, `知识库「${key}」`)
+  }
+  const overrides: Record<string, CatalogEntry> = {}
+  for (const [name, raw] of Object.entries(rawOverrides)) {
+    const key = name.trim()
+    if (!key) throw new Error('覆盖配置的模型 id 不能为空')
+    overrides[key] = checkedEntry(raw, `覆盖「${key}」`)
+  }
+  // update() deep-merges patches, so an emptied dict could never delete
+  // stored entries — replace both dicts wholesale with path ops instead.
+  // mutate() still queues serialized work per namespace: awaited before the
+  // response.
+  await settingsService!.mutate(NAMESPACE, [
+    { op: 'set', path: ['capabilityCatalog'], value: catalog },
+    { op: 'set', path: ['capabilityOverrides'], value: overrides },
+  ])
+  return await replayRouteCapabilities(settingsService!, routeName, currentKnowledge())
 }
 
 /**
@@ -233,8 +360,8 @@ export function apply(ctx: HostContext, config: Partial<PluginConfig> | undefine
       return json({ ok: true, state: await buildState(currentSection()) })
     })
 
-    // API keys of the account, with group + group ratio metadata. The key
-    // material itself is never sent to the browser.
+    // API keys of the account with per-key metadata. The key material itself
+    // is never sent to the browser.
     route(connection, ctx, 'keys', ['GET'], () => keysResponse())
 
     route(connection, ctx, 'use', ['POST'], async (request) => {
@@ -244,70 +371,24 @@ export function apply(ctx: HostContext, config: Partial<PluginConfig> | undefine
       const section = currentSection()
       const missing = missingSetup(section)
       if (missing) return json({ ok: false, error: `missing:${missing}` }, 400)
-      if (!settingsService || !credentialsService) return json({ ok: false, error: 'services unavailable' }, 500)
-      const relay = relayFromSection(section)
-      const previous = safeGet('agent-default-model') as { model?: string } | undefined
-      let plan
+      let result
       try {
-        plan = await planSwitch({
-          relay,
-          section,
-          idOrName,
-          preferModel: typeof body.model === 'string' && body.model ? body.model : previous?.model,
-          noModels: body.noModels === true,
-          storedModels: storedRouteModels(settingsService, section.route),
-        })
+        result = await performSwitch(section, idOrName, body.noModels === true)
       } catch (err) {
         const status = (err as { code?: string }).code === 'KEY_NOT_FOUND' ? 404 : 502
         return json({ ok: false, error: err instanceof Error ? err.message : String(err) }, status)
       }
-      const warnings: string[] = []
-      if (!plan.token.enabled) {
-        warnings.push(`「${plan.token.name}」当前处于禁用状态，请求会被中转站拒绝；请先到中转站控制台启用它。`)
-      }
-      try {
-        await credentialsService.set(section.keyRef, plan.token.key)
-      } catch (err) {
-        return json({ ok: false, error: `凭据写入失败: ${err instanceof Error ? err.message : String(err)}` }, 500)
-      }
-      // One write carries the connection fields and the merged catalog; the
-      // merge keeps capability config and manual fields of surviving ids.
-      const profileFields = routeProfileFields(section)
-      const models = plan.ids ? mergeCatalog(plan.ids, storedRouteModels(settingsService, section.route)) : undefined
-      try {
-        await settingsService.update('llm-pi-ai', {
-          providers: { [section.route]: models ? { ...profileFields, models } : profileFields },
-        })
-      } catch (err) {
-        warnings.push(`模型列表写入被 llm-pi-ai 设置校验拒绝: ${err instanceof Error ? err.message : String(err)}`)
-      }
-      try {
-        await settingsService.update('agent-default-model', {
-          provider: section.route,
-          model: plan.defaultModel,
-        })
-      } catch (err) {
-        warnings.push(`默认模型写入被拒绝: ${err instanceof Error ? err.message : String(err)}`)
-      }
-      // update() queues serialized work per namespace: every write must be
-      // awaited before this responds — the client refetches /keys on arrival.
-      try {
-        await settingsService.update(NAMESPACE, { selectedKeyName: plan.token.name })
-      } catch {
-        /* cosmetic only */
-      }
       return json({
         ok: true,
-        key: { id: plan.token.id, name: plan.token.name, enabled: plan.token.enabled },
-        modelCount: plan.ids?.length ?? 0,
-        defaultModel: plan.defaultModel,
-        warnings,
+        key: { id: result.plan.token.id, name: result.plan.token.name, enabled: result.plan.token.enabled },
+        modelCount: result.plan.ids?.length ?? 0,
+        warnings: result.warnings,
       })
     })
 
     // The active key's callable models with pricing. Also republishes the
     // model list into the dsh route config (hot-reloads running sessions),
-    // preserving capability config and manual fields of surviving ids.
+    // with the capability rules from the knowledge base applied.
     route(connection, ctx, 'models', ['GET'], async () => {
       const section = currentSection()
       const missing = missingSetup(section)
@@ -337,7 +418,7 @@ export function apply(ctx: HostContext, config: Partial<PluginConfig> | undefine
       }))
       let catalogWarning: string | undefined
       try {
-        await syncRouteCatalog(settingsService, section, ids)
+        await syncRouteCatalog(settingsService, section, ids, currentKnowledge())
       } catch (err) {
         catalogWarning = err instanceof Error ? err.message : String(err)
       }
@@ -351,42 +432,274 @@ export function apply(ctx: HostContext, config: Partial<PluginConfig> | undefine
       })
     })
 
-    // Capability Tab: GET reads the stored per-model capability fields plus
-    // the route default input; POST saves (field-level merge into the stored
-    // models array, revision-guarded against concurrent writers — see
-    // route-config.ts). One registration serves both methods: dsh allows a
-    // single fetch route per path.
+    // Capability Tab: the knowledge base plus per-id overrides live in the
+    // relay namespace; the route entries carry only the derived result. GET
+    // returns both dicts and the derived per-model view; POST persists both
+    // dicts and replays the derivation over the route in one guarded write.
     route(connection, ctx, 'capabilities', ['GET', 'POST'], async (request) => {
       if (!settingsService) return json({ ok: false, error: 'settings service unavailable' }, 500)
       const section = currentSection()
       if (request.method === 'GET') {
+        const knowledge = currentKnowledge()
         const profile = storedRouteProfile(settingsService, section.route)
-        if (!profile) return json({ ok: true, configured: false, route: section.route, models: [] })
-        const entries = Array.isArray(profile.models) ? profile.models : []
         return json({
           ok: true,
-          configured: true,
+          configured: Boolean(profile),
           route: section.route,
-          routeDefaultInput: Array.isArray(profile.defaultInput) ? profile.defaultInput : ['text'],
-          models: entries.map((entry) => ({ id: entry.id, ...capabilityOf(entry) })),
+          routeDefaultInput: Array.isArray(profile?.defaultInput) ? profile!.defaultInput : ['text'],
+          catalog: knowledge.capabilityCatalog,
+          overrides: knowledge.capabilityOverrides,
+          models: capabilityModelsView(section.route),
         })
       }
       const body = await readJson(request)
-      const updates = Array.isArray(body.updates) ? body.updates as CapabilityUpdate[] : []
       try {
-        const models = await saveCapabilities(settingsService, section.route, updates)
-        return json({ ok: true, models: models.map((entry) => ({ id: entry.id, ...capabilityOf(entry) })) })
+        await saveKnowledgeAndReplay(section.route, body)
+        return json({ ok: true, models: capabilityModelsView(section.route) })
       } catch (err) {
         return json({ ok: false, error: err instanceof Error ? err.message : String(err) }, 400)
       }
     })
 
-    // ↻ per capability card: models.dev initial values for one model id.
+    // ↻ models.dev reference values for one model name (knowledge base default).
     route(connection, ctx, 'model-info', ['GET'], async (request) => {
       const modelId = new URL(request.url).searchParams.get('model') ?? ''
       if (!modelId) return json({ ok: false, error: 'model is required' }, 400)
       const suggestion = await modelsDev.suggest(modelId)
       return json({ ok: true, model: modelId, suggestion })
+    })
+
+    // Create a key on the panel. The panel-generated secret is stripped in
+    // relay.createToken — it never reaches this response. setAsActive runs
+    // the regular switch flow server-side (secret only enters the credential
+    // store).
+    route(connection, ctx, 'keys-create', ['POST'], async (request) => {
+      const body = await readJson(request)
+      const name = typeof body.name === 'string' ? body.name.trim() : ''
+      const group = typeof body.group === 'string' ? body.group.trim() : ''
+      if (!name) return json({ ok: false, error: 'key 名称必填' }, 400)
+      if (!group) return json({ ok: false, error: '分组必填' }, 400)
+      const unlimitedQuota = body.unlimitedQuota === true
+      let remainQuota = 0
+      if (!unlimitedQuota) {
+        remainQuota = Number(body.remainQuota ?? 0)
+        if (!Number.isInteger(remainQuota) || remainQuota < 0) {
+          return json({ ok: false, error: '额度须为非负整数（点数）' }, 400)
+        }
+      }
+      let expiredTime = -1
+      if (body.expiredTime !== undefined && body.expiredTime !== null && body.expiredTime !== -1) {
+        expiredTime = Number(body.expiredTime)
+        if (!Number.isFinite(expiredTime) || expiredTime <= 0) {
+          return json({ ok: false, error: '有效期非法' }, 400)
+        }
+      }
+      const section = currentSection()
+      const missing = missingSetup(section)
+      if (missing) return json({ ok: false, error: `missing:${missing}` }, 400)
+      const relay = relayFromSection(section)
+      const created = await relay.createToken({ name, group, unlimitedQuota, remainQuota, expiredTime })
+      const warnings: string[] = []
+      let switched = false
+      if (body.setAsActive === true) {
+        try {
+          const result = await performSwitch(section, String(created.id), false)
+          switched = true
+          warnings.push(...result.warnings)
+        } catch (err) {
+          warnings.push(`创建成功，但切换生效失败: ${err instanceof Error ? err.message : String(err)}`)
+        }
+      }
+      return json({ ok: true, key: { id: created.id, name: created.name }, switched, warnings })
+    })
+
+    // Edit one key: read the panel's own record, merge validated fields, PUT
+    // the whole object back (the endpoint is a whole-object update).
+    route(connection, ctx, 'keys-update', ['POST'], async (request) => {
+      const body = await readJson(request)
+      const id = body.id
+      if (id === undefined || id === null || id === '') return json({ ok: false, error: '缺少 key id' }, 400)
+      const section = currentSection()
+      const missing = missingSetup(section)
+      if (missing) return json({ ok: false, error: `missing:${missing}` }, 400)
+      const relay = relayFromSection(section)
+      const records = await relay.listTokensRaw()
+      const record = records.find((r) => String(r.id) === String(id))
+      if (!record) return json({ ok: false, error: `找不到编号为「${String(id)}」的 key` }, 404)
+      if (body.name !== undefined) {
+        const name = typeof body.name === 'string' ? body.name.trim() : ''
+        if (!name) return json({ ok: false, error: 'key 名称不能为空' }, 400)
+        record.name = name
+      }
+      if (body.group !== undefined) {
+        const group = typeof body.group === 'string' ? body.group.trim() : ''
+        if (!group) return json({ ok: false, error: '分组不能为空' }, 400)
+        record.group = group
+      }
+      if (body.unlimitedQuota !== undefined) {
+        record.unlimited_quota = body.unlimitedQuota === true
+      }
+      if (body.remainQuota !== undefined) {
+        const remainQuota = Number(body.remainQuota)
+        if (!Number.isInteger(remainQuota) || remainQuota < 0) {
+          return json({ ok: false, error: '额度须为非负整数（点数）' }, 400)
+        }
+        record.remain_quota = remainQuota
+      }
+      if (body.expiredTime !== undefined) {
+        const expiredTime = Number(body.expiredTime)
+        if (!Number.isFinite(expiredTime) || (expiredTime !== -1 && expiredTime <= 0)) {
+          return json({ ok: false, error: '有效期非法' }, 400)
+        }
+        record.expired_time = expiredTime
+      }
+      // Upstream UpdateToken applies regular fields and status in two
+      // distinct modes: a plain PUT ignores status entirely.
+      const wantsEdit = body.name !== undefined || body.group !== undefined
+        || body.unlimitedQuota !== undefined || body.remainQuota !== undefined || body.expiredTime !== undefined
+      const wantsStatus = body.enabled !== undefined
+      if (!wantsEdit && !wantsStatus) return json({ ok: false, error: '没有需要修改的字段' }, 400)
+      if (wantsEdit) await relay.updateToken(record)
+      if (wantsStatus) {
+        record.status = body.enabled === true ? 1 : 2
+        await relay.updateToken(record, true)
+      }
+      return json({ ok: true })
+    })
+
+    // Delete one key. Response carries active:true when the deleted key was
+    // the currently active one, so the client can warn (two-step confirm).
+    route(connection, ctx, 'keys-delete', ['POST'], async (request) => {
+      const body = await readJson(request)
+      const id = body.id
+      if (id === undefined || id === null || id === '') return json({ ok: false, error: '缺少 key id' }, 400)
+      const section = currentSection()
+      const missing = missingSetup(section)
+      if (missing) return json({ ok: false, error: `missing:${missing}` }, 400)
+      const relay = relayFromSection(section)
+      let name = ''
+      try {
+        const tokens = await relay.listTokens()
+        name = tokens.find((t) => String(t.id) === String(id))?.name ?? ''
+      } catch {
+        /* the delete attempt below surfaces real errors */
+      }
+      await relay.deleteToken(id as number | string)
+      return json({ ok: true, active: name !== '' && name === section.selectedKeyName })
+    })
+
+    // Dashboard: account cards plus per-day per-model usage buckets (¥ done
+    // server-side). Panels keep only recent buckets — sparse/empty is normal.
+    route(connection, ctx, 'dashboard', ['GET'], async (request) => {
+      const section = currentSection()
+      const missing = missingSetup(section)
+      if (missing) return json({ ok: false, error: `missing:${missing}` }, 400)
+      const daysParam = Number(new URL(request.url).searchParams.get('days') ?? 7)
+      const days = Number.isInteger(daysParam) && daysParam >= 1 && daysParam <= 30 ? daysParam : 7
+      const nowSeconds = Math.floor(Date.now() / 1000)
+      const relay = relayFromSection(section)
+      let self: Record<string, unknown> | null
+      try {
+        self = await relay.self()
+      } catch (err) {
+        return json({ ok: false, error: err instanceof Error ? err.message : String(err) }, 502)
+      }
+      let todayStatQuota = 0
+      try {
+        todayStatQuota = (await relay.logStat(startOfToday(nowSeconds), nowSeconds)).quota
+      } catch {
+        /* today's card falls back to 0 */
+      }
+      let rawBuckets: Record<string, unknown>[] = []
+      let warning: string | undefined
+      try {
+        rawBuckets = await relay.usageData(startOfDaysAgo(nowSeconds, days - 1), nowSeconds)
+      } catch (err) {
+        warning = `用量桶获取失败（面板可能未保留数据）: ${err instanceof Error ? err.message : String(err)}`
+      }
+      const dashboard = buildDashboardView({
+        self,
+        todayStatQuota,
+        buckets: aggregateDailyBuckets(rawBuckets, days, nowSeconds),
+        days,
+        nowSeconds,
+      })
+      return json({ ok: true, dashboard, warning })
+    })
+
+    // Usage logs: one page of the panel's log list, shaped for the table
+    // (`other` pre-parsed into a first-response-time field).
+    route(connection, ctx, 'logs', ['GET'], async (request) => {
+      const section = currentSection()
+      const missing = missingSetup(section)
+      if (missing) return json({ ok: false, error: `missing:${missing}`, logs: [] }, 400)
+      const params = new URL(request.url).searchParams
+      const numberParam = (key: string): number | undefined => {
+        const raw = params.get(key)
+        if (raw === null || raw === '') return undefined
+        const n = Number(raw)
+        return Number.isFinite(n) ? n : undefined
+      }
+      const stringParam = (key: string): string | undefined => {
+        const raw = params.get(key)
+        return raw ? raw : undefined
+      }
+      const relay = relayFromSection(section)
+      const page = await relay.logs({
+        p: numberParam('p') ?? 1,
+        pageSize: numberParam('pageSize') ?? 10,
+        startTimestamp: numberParam('start'),
+        endTimestamp: numberParam('end'),
+        tokenName: stringParam('tokenName'),
+        modelName: stringParam('modelName'),
+        group: stringParam('group'),
+      })
+      return json({
+        ok: true,
+        page: page.page,
+        pageSize: page.pageSize,
+        total: page.total,
+        logs: page.items.map(normalizeLog),
+      })
+    })
+
+    // Page-header statistics over the current filter window.
+    route(connection, ctx, 'logs-stat', ['GET'], async (request) => {
+      const section = currentSection()
+      const missing = missingSetup(section)
+      if (missing) return json({ ok: false, error: `missing:${missing}` }, 400)
+      const params = new URL(request.url).searchParams
+      const numberParam = (key: string): number | undefined => {
+        const raw = params.get(key)
+        if (raw === null || raw === '') return undefined
+        const n = Number(raw)
+        return Number.isFinite(n) ? n : undefined
+      }
+      const relay = relayFromSection(section)
+      const stat = await relay.logStat(numberParam('start'), numberParam('end'))
+      return json({ ok: true, stat: { quota: stat.quota, quotaCny: formatQuota(stat.quota), rpm: stat.rpm, tpm: stat.tpm } })
+    })
+
+    // Filter dropdown sources: account-visible model ids and usable groups.
+    route(connection, ctx, 'logs-meta', ['GET'], async () => {
+      const section = currentSection()
+      const missing = missingSetup(section)
+      if (missing) return json({ ok: false, error: `missing:${missing}`, models: [], groups: {} }, 400)
+      const relay = relayFromSection(section)
+      let models: string[] = []
+      try {
+        models = await relay.userModels()
+      } catch {
+        /* dropdown degrades to free text */
+      }
+      const pricing = await relay.pricing()
+      const groups: Record<string, string> = {}
+      if (pricing) {
+        for (const [name, description] of Object.entries(pricing.usableGroup)) {
+          if (name.trim()) groups[name] = String(description ?? '')
+        }
+      }
+      return json({ ok: true, models, groups })
     })
   })
 }

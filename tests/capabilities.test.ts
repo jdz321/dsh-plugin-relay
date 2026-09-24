@@ -65,6 +65,31 @@ describe('mergeSuggestions (same id under several providers)', () => {
   })
 })
 
+describe('mapModelsDevEntry context window (limit.context)', () => {
+  it('extracts the context window for the knowledge base default', () => {
+    const entry = {
+      modalities: { input: ['text'] },
+      reasoning: false,
+      limit: { context: 131072, output: 8192 },
+    }
+    expect(mapModelsDevEntry(entry)).toEqual({ input: ['text'], reasoning: false, contextWindow: 131072 })
+  })
+
+  it('ignores missing or non-positive limits; keeps entries with data otherwise', () => {
+    expect(mapModelsDevEntry({ modalities: { input: ['text'] }, limit: {} })).toEqual({ input: ['text'], reasoning: null })
+    expect(mapModelsDevEntry({ limit: { context: 0 } })).toBeNull()
+    expect(mapModelsDevEntry({ limit: { context: Number.NaN } })).toBeNull()
+  })
+
+  it('merges context windows across providers, preferring the largest known', () => {
+    const merged = mergeSuggestions([
+      { input: ['text'], reasoning: false, contextWindow: 131072 },
+      { input: ['text'], reasoning: false, contextWindow: 1_048_576 },
+    ])
+    expect(merged).toEqual({ input: ['text'], reasoning: false, contextWindow: 1_048_576 })
+  })
+})
+
 describe('ModelsDevClient', () => {
   it('looks up a model across providers and merges', async () => {
     const client = new ModelsDevClient({

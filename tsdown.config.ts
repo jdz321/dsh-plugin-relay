@@ -16,6 +16,8 @@ const id = 'dsh-plugin-relay'
 const CLIENT_EXTERNALS = [
   'react',
   'react/jsx-runtime',
+  'react-dom',
+  'react-dom/client',
 ] as const
 
 /** Node-side runtime imports provided by the Harness host, never bundled. */
@@ -47,6 +49,9 @@ export default defineConfig([
     platform: 'browser',
     dts: false,
     clean: false,
+    // The browser module table has no `process`: bundled dependencies
+    // (recharts) carry NODE_ENV guards that must resolve at build time.
+    define: { 'process.env.NODE_ENV': JSON.stringify('production') },
     deps: {
       neverBundle: [...CLIENT_EXTERNALS],
       onlyBundle: false,

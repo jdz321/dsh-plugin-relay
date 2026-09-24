@@ -1,7 +1,7 @@
 import path from 'node:path'
 import { describe, expect, it } from 'vitest'
 
-import { resolveDevHome, resolveDshEntry } from '../scripts/dev.js'
+import { parseDevArgs, resolveDevHome, resolveDshEntry } from '../scripts/dev.js'
 
 const ROOT = path.resolve(import.meta.dirname, '..')
 
@@ -22,5 +22,19 @@ describe('dev launcher home anchoring', () => {
     const entry = resolveDshEntry()
     const rel = path.relative(ROOT, entry)
     expect(rel).toMatch(/^node_modules\/@deepseek-ai\/dsh\/.*bin\.js$/)
+  })
+})
+
+describe('dev launcher flag parsing (--no-open passthrough)', () => {
+  it('defaults to opening the browser on port 3098', () => {
+    expect(parseDevArgs([])).toEqual({ homeFlag: undefined, port: '3098', noOpen: false })
+  })
+
+  it('parses --no-open alongside --dsh-home and --port', () => {
+    expect(parseDevArgs(['--no-open', '--port', '3198', '--dsh-home', '/tmp/h']))
+      .toEqual({ homeFlag: '/tmp/h', port: '3198', noOpen: true })
+    // flag order does not matter; unknown args are ignored
+    expect(parseDevArgs(['--port', '3298', '--no-open', '--something-else']))
+      .toEqual({ homeFlag: undefined, port: '3298', noOpen: true })
   })
 })

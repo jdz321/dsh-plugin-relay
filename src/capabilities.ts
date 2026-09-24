@@ -9,7 +9,8 @@
  * budget_tokens) means "reasons, but offers no effort ladder" — suggested as
  * reasoning ON with the middle effort level, which the user can adjust.
  * A model id may appear under several providers; suggestions merge (modalities
- * union; the most specific reasoning shape wins).
+ * union; the most specific reasoning shape wins; largest known context window
+ * wins). `limit.context` feeds the knowledge base's default context window.
  */
 
 import { EFFORT_LEVELS, MODALITIES } from './constants.js'
@@ -19,12 +20,15 @@ import { requestJson } from './http.js'
 export interface CapabilitySuggestion {
   input: string[]
   reasoning: false | { levels: string[] } | null
+  /** Default context window in tokens (models.dev `limit.context`), when known. */
+  contextWindow?: number
 }
 
 interface ModelsDevEntry {
   modalities?: { input?: string[] }
   reasoning?: boolean
   reasoning_options?: Array<{ type?: string, values?: string[] } & Record<string, unknown>>
+  limit?: { context?: number, output?: number }
 }
 
 type ModelsDevDoc = Record<string, { models?: Record<string, ModelsDevEntry> }>
@@ -55,8 +59,10 @@ export function mapModelsDevEntry(entry: ModelsDevEntry | undefined): Capability
   } else {
     reasoning = null
   }
-  if (!input.length && reasoning === null) return null
-  return { input, reasoning }
+  const context = Number(entry.limit?.context)
+  const contextWindow = Number.isFinite(context) && context > 0 ? context : undefined
+  if (!input.length && reasoning === null && contextWindow === undefined) return null
+  return { input, reasoning, ...(contextWindow !== undefined ? { contextWindow } : {}) }
 }
 
 /** Merge suggestions for the same model id seen under several providers. */
@@ -76,8 +82,14 @@ export function mergeSuggestions(suggestions: readonly (CapabilitySuggestion | n
     reasoning = candidate.reasoning
     break
   }
-  if (!orderedInput.length && reasoning === null) return null
-  return { input: orderedInput, reasoning }
+  const windows = usable.map((s) => s.contextWindow).filter((w): w is number => typeof w === 'number')
+  const contextWindow = windows.length ? Math.max(...windows) : undefined
+  if (!orderedInput.length && reasoning === null && contextWindow === undefined) return null
+  return {
+    input: orderedInput,
+    reasoning,
+    ...(contextWindow !== undefined ? { contextWindow } : {}),
+  }
 }
 
 export interface ModelsDevOptions {

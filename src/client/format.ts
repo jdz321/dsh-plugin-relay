@@ -71,3 +71,58 @@ export function setupHintFor(error: string, t: Translator): string | null {
 export function normalizeBaseUrlDraft(value: string): string {
   return value.trim().replace(/\/+$/, '')
 }
+
+/** Quota points → compact CNY estimate (for form hints; 4 decimals trimmed). */
+export function pointsToCnyText(points: number): string {
+  return trimNum(points / 500000)
+}
+
+/** Local `MM-DD HH:mm:ss` for a unix-seconds log timestamp. */
+export function formatLogTime(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds <= 0) return '—'
+  const d = new Date(seconds * 1000)
+  const pad = (n: number): string => String(n).padStart(2, '0')
+  return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
+}
+
+/** `4.2s` style duration; null renders as an em dash. */
+export function secondsLabel(seconds: number | null): string {
+  return seconds !== null && Number.isFinite(seconds) && seconds > 0 ? `${seconds.toFixed(1)}s` : '—'
+}
+
+/** `YYYY-MM-DDTHH:mm` for a datetime-local input from unix seconds. */
+export function datetimeLocalValue(seconds: number): string {
+  const d = new Date(seconds * 1000)
+  const pad = (n: number): string => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`
+}
+
+/** Unix seconds from a datetime-local input value; NaN when empty/invalid. */
+export function datetimeLocalSeconds(value: string): number {
+  const parsed = new Date(value).getTime()
+  return Number.isNaN(parsed) ? NaN : Math.floor(parsed / 1000)
+}
+
+/** Local midnight seconds of the first day of the current month. */
+export function startOfMonthSeconds(now = new Date()): number {
+  return Math.floor(new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0, 0).getTime() / 1000)
+}
+
+/** Local 23:59:59 seconds of the last day of the current month. */
+export function endOfMonthSeconds(now = new Date()): number {
+  return Math.floor(new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 0).getTime() / 1000)
+}
+
+/** Unix seconds at 23:59:59 local of the given `YYYY-MM-DD` date value; NaN when empty. */
+export function endOfDaySeconds(dateValue: string): number {
+  if (!dateValue) return NaN
+  const parsed = new Date(`${dateValue}T23:59:59`)
+  return Number.isNaN(parsed.getTime()) ? NaN : Math.floor(parsed.getTime() / 1000)
+}
+
+/** `YYYY-MM-DD` of a unix-seconds timestamp, local calendar. */
+export function dateInputValue(seconds: number): string {
+  const d = new Date(seconds * 1000)
+  const pad = (n: number): string => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+}

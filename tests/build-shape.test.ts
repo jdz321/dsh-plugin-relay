@@ -26,8 +26,14 @@ describe('built artifacts', () => {
     expect(text.trimEnd().endsWith('});')).toBe(true)
     expect(text).toContain('exports.apply')
     expect(text).toContain('exports.inject')
-    // react comes from the shell's module table
+    // react family comes from the shell's frozen module table; everything
+    // else — the chart library included — is bundled into the artifact.
     expect(text).toContain('require("react")')
+    const requires = [...text.matchAll(/\brequire\("([^"]+)"\)/g)].map((m) => m[1])
+    const bare = [...new Set(requires.filter((spec) => !spec.startsWith('.') && !spec.startsWith('/')))]
+    for (const spec of bare) {
+      expect(['react', 'react/jsx-runtime', 'react-dom', 'react-dom/client']).toContain(spec)
+    }
     // no bare module imports (pure classic script)
     expect(text).not.toMatch(/^\s*import\s/m)
   })

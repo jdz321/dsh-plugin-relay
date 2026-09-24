@@ -2,11 +2,15 @@
  * Core relay operations behind the fetch routes: key picking, model
  * discovery, switch planning, and the settings-section shape. Pure logic —
  * the host entry applies plans through ctx.settings / ctx.credentials.
+ *
+ * Since v0.5.0 the plugin does NOT manage a "default model": dsh picks the
+ * model per conversation/session on its own (its `agent-default-model`
+ * namespace stays the user's business). A switch only writes the credential,
+ * the route profile, and the synced catalog.
  */
 
 import { KEY_REF_DEFAULT, ROUTE_DEFAULT } from './constants.js'
 import { Relay, type RelayToken } from './relay.js'
-import type { RouteModelEntry } from './types.js'
 
 /** The plugin's settings section shape (connection + routing metadata). */
 export interface Section {
@@ -92,6 +96,8 @@ export function keySummary(token: RelayToken, { selectedName = '', groupRatio = 
     group: token.group || '',
     groupRatio,
     remainCny: token.unlimitedQuota ? null : formatQuota(token.remainQuota),
+    /** Raw quota points for the edit form (CNY display is derived from it). */
+    remainPoints: token.remainQuota ?? 0,
     unlimited: token.unlimitedQuota,
     usedCny: formatQuota(token.usedQuota),
     neverExpires: token.neverExpires,
@@ -141,7 +147,6 @@ export interface SwitchPlan {
   token: RelayToken
   /** Model ids the key can call, null when catalog discovery was skipped. */
   ids: string[] | null
-  defaultModel: string
 }
 
 /** Thrown by planSwitch when no key matches the selector. */
@@ -155,19 +160,6 @@ export class KeyNotFoundError extends Error {
 }
 
 /**
- * The default model after a switch: keep the previous default when the key
- * still serves it (or discovery was skipped and the route still lists it),
- * else the first discovered id, else the first id already on the route, else
- * the pi-ai convention fallback.
- */
-export function defaultModelAfterSwitch(ids: readonly string[] | null, preferModel: string | undefined, storedModels: readonly RouteModelEntry[] | undefined): string {
-  if (preferModel && (!ids || ids.includes(preferModel) || storedModels?.some((e) => e.id === preferModel))) {
-    return preferModel
-  }
-  return ids?.[0] ?? storedModels?.map((e) => e.id)[0] ?? 'deepseek-chat'
-}
-
-/**
  * Plan a key switch without side effects. The caller applies the plan —
  * the host plugin goes through ctx.settings / ctx.credentials.
  */
@@ -175,12 +167,9 @@ export async function planSwitch(opts: {
   relay: Relay
   section: Section
   idOrName: string
-  preferModel?: string
   noModels?: boolean
-  /** Existing stored route entries, so the previous default can survive. */
-  storedModels?: readonly RouteModelEntry[]
 }): Promise<SwitchPlan> {
-  const { relay, section, idOrName, preferModel, noModels, storedModels } = opts
+  const { relay, section, idOrName, noModels } = opts
   const tokens = await relay.listTokens()
   const token = pickToken(tokens, idOrName)
   if (!token) throw new KeyNotFoundError(idOrName)
@@ -188,6 +177,5 @@ export async function planSwitch(opts: {
   return {
     token,
     ids: catalog?.ids ?? null,
-    defaultModel: defaultModelAfterSwitch(catalog?.ids ?? null, preferModel, storedModels),
   }
 }

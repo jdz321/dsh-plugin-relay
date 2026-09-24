@@ -19,9 +19,10 @@
 把 dsh 接入 **new-api 系中转站面板**（one-api / new-api / Veloera / done-hub 等同族；无任何面板专属默认值）。插件 = npm 包 `dsh-plugin-relay`：
 
 - **连接**：baseUrl、访问令牌（write-only）、用户 ID（手动填写）存于 `relay` 设置 namespace，保存即热生效；连接字段由插件动态镜像到 `llm-pi-ai.providers.<route>`（baseURL 等），**不依赖 patch 硬编码**；
-- **API Keys**：列出账户全部 key（名称/分组/分组倍率/额度/有效期，**不含 key 内容**），一键「使用」切换生效 key（禁用 key 附加警告），切换时同步模型目录与默认模型；
+- **API Keys**：列出/新建/编辑/删除账户 key（名称/分组/分组倍率/额度/有效期/启停，**不含 key 内容**），一键「使用」切换生效 key（禁用 key 附加警告），切换时同步模型目录；创建 key 的明文在宿主侧剥离（「创建并设为生效」走服务端凭据写入，不做复制 key 功能）；
 - **模型**：当前生效 key 可调用的模型（id + 价格 + 分组），三种计价口径；刷新时同步进 dsh 路由目录，**按 id 预合并保留既有字段**；
-- **模型能力**：按模型配置输入模态（text/image）与推理档位（false | off+档位字典），写 `llm-pi-ai.providers.relay.models[n].{input,reasoningEfforts}`——与官方「模型」页同一份配置、字段级合并互不覆盖；↻ 可从 models.dev 取参考值（宿主代理+缓存）；支持手工添加/删除模型；
+- **数据看板/使用日志**：余额 + 近 7 天按模型消耗堆叠图（recharts 打进 client 产物，react 系外置）；面板日志分页/筛选/整形（`other` JSON 解析 `frt`，容错）；
+- **模型能力**：能力配置真源在插件 namespace——**知识库**（按规范模型名：input/reasoning/contextWindow）+ **按面板 id 覆盖**；同步/保存时按「覆盖 → 知识库匹配（精确 → 剥一至两层变体后缀=近似）→ 不触碰」重放到 `llm-pi-ai.providers.relay.models[n].{input,reasoningEfforts,contextWindow}`，只写插件持有配置的字段（官方「模型」页对未配置 id 的手工修改不被冲掉）；↻ 从 models.dev 取默认值（含 limit.context；宿主代理+缓存）；**插件不管理默认模型**（agent-default-model 是用户自己的事）；
 - **热生效**：一切写入走 dsh settings/credentials 服务，运行中会话下一次请求立即生效。
 
 ## 2. 仓库结构
@@ -107,6 +108,11 @@ DSH_HOME="$PWD/.dsh-home" node_modules/.bin/dsh plugin --profile web add "$PWD"
 - 端点：`GET /api/user/self`、`GET /api/token/?p=1&size=100`（兼容 `{items,total}` 与裸数组）、`GET /api/user/models`、`GET /api/pricing`（多数面板公开；缺失时优雅降级）、`GET /v1/models`（sk- key，key 可用模型的**权威**来源）。
 - `/api/pricing` 三种计价方言：`input_price/output_price`（$/1M tokens，新式按量）> `quota_type=1 + model_price`（按次）> `model_ratio × completion_ratio`（经典倍率）；顶层 `group_ratio` 分组倍率；`vendors: [{id,name,icon}]` + 条目 `vendor_id` 是面板 fork 扩展，用作能力卡片来源徽标（`pricing.ts` 已归一化）。
 - models.dev（`https://models.dev/api.json`）字段事实：`modalities.input`（可能含 text/image/pdf 等，映射时与 {text,image} 交集）、`reasoning: boolean`、`reasoning_options` 三态：`{type:'effort',values:[…]}`（映射档位交集）、`{type:'toggle'}` 与 `{type:'budget_tokens',min}`（视为「有推理无档位」，建议 medium 起步）、以及 `reasoning:false`（显式非推理）。同一模型 id 可能出现在多个 provider 下，取并集（档位信息优先于 toggle/false）。
+- **token CRUD**：`POST /api/token/`（该 fork 校验「分组不能为空」；响应 `data.key` 是唯一一次明文机会，宿主必须剥离）；`PUT /api/token/` 整对象更新——**status 字段只在 `?status_only=true` 变体下生效**（上游 UpdateToken 语义：普通 PUT 只更新 name/expired_time/remain_quota/unlimited_quota/model_limits*/allow_ips/group），启停须单独一次 status_only PUT；`DELETE /api/token/{id}`；编辑必须以列表原始记录为基合并回传。上游字段名是 snake_case（`remain_quota`/`unlimited_quota`/`expired_time`，`expired_time=-1` 为永久）。
+- **使用日志**：`GET /api/log/self?p=&page_size=&type=0&start_timestamp=&end_timestamp=&token_name=&model_name=&group=` → `{data:{page,page_size,total,items}}`；条目含 `cache_read_tokens/cache_creation_tokens/reasoning_tokens/reasoning_effort` 独立列；首字耗时在 `other` JSON 串的 `frt`（毫秒），解析必须容错；名称筛选为子串匹配、分组为精确。
+- **用量统计**：`GET /api/log/self/stat[start_timestamp&end_timestamp]` → `{quota,rpm,tpm}`；不带参数是**全量口径**（今日口径须显式传今日零点窗口）。
+- **数据看板**：`GET /api/data/self?start_timestamp=&end_timestamp=&default_time=hour` → 裸数组小时桶 `{model_name,created_at,token_used,count,quota}`；面板只保留近期桶（稀疏/空是常态）；插件统一请求 hour 桶、客户端按本地日聚合，不依赖 fork 的 day 语义。`/api/user/self` 有 `quota/used_quota/request_count`。
+- **模型 id ↔ models.dev 匹配**：规则为「精确 id → 剥一至两层尾部 `-变体` 段再精确（标注 approximate）→ 放弃」；不做模糊/大小写归一化（实测零增益有误配风险）；未命中多为渠道命名面板特有模型（`grok-video`、`gpt-image-2.5-*` 族）。
 - 额度换算：¥ ≈ quota 点数 ÷ 500000（面板口径）。
 
 ## 6. 测试与验收
@@ -130,4 +136,5 @@ DSH_HOME="$PWD/.dsh-home" node_modules/.bin/dsh plugin --profile web add "$PWD"
 - **v0.2.0**：连接信息全部进 Web 设置页；同类中转站通用。
 - **v0.2.1**：修 `npm start` 误用外部 dsh home（home 解析锚定仓库）。
 - **v0.3.0**：纯插件化 npm 包结构（删 CLI）；keys/models UI 重做；`/use` 服务端写竞态修复；自动探测用户 ID 移除。
-- **v0.4.0（当前）**：全面去 vendor 专名化（包名 dsh-plugin-relay / namespace relay / 路由 /api/relay/* / keyRef RELAY_API_KEY）；**删 prettyModelName**（模型只认 id，目录 name=id）；**设置页四选项卡 + 「模型能力」选项卡**（能力写 models 条目的 input/reasoningEfforts，字段级合并 + 修订守卫；models.dev 参考值；手工增删）；**TypeScript 重构**（src/ → tsdown → lib/；宿主 ESM + client CJS 包裹产物；vitest；tsc strict）。
+- **v0.5.0（当前）**：模型能力知识库 + 匹配规则（真源移入插件 namespace，路由条目能力字段变派生状态；contextWindow 默认值）；**移除默认模型管理**（不写 agent-default-model，文案同步）；账户行精简（用户名 + 余额）；**API key 增删改**（明文剥离 + status_only 启停）；数据看板（recharts 堆叠图，react 系外置、process.env.NODE_ENV 构建期消解）与使用日志页签；dev 启动器 `--no-open`。
+- **v0.4.0**：全面去 vendor 专名化（包名 dsh-plugin-relay / namespace relay / 路由 /api/relay/* / keyRef RELAY_API_KEY）；**删 prettyModelName**（模型只认 id，目录 name=id）；**设置页四选项卡 + 「模型能力」选项卡**（能力写 models 条目的 input/reasoningEfforts，字段级合并 + 修订守卫；models.dev 参考值；手工增删）；**TypeScript 重构**（src/ → tsdown → lib/；宿主 ESM + client CJS 包裹产物；vitest；tsc strict）。

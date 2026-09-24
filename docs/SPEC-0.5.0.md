@@ -47,7 +47,7 @@ v0.4.0 已交付连接 / API Keys / 模型 / 模型能力 四选项卡。v0.5.0 
 
 - 列表 `GET /api/token/?p=1&size=N` → `{data: {page, page_size, total, items: [...]}}`。条目字段：`id, user_id, key(明文，插件侧必须剥离), status(1 启用/2 禁用…), name, created_time, accessed_time, expired_time(-1=永久), remain_quota, unlimited_quota, model_limits_enabled, model_limits(逗号分隔 id 串), allow_ips, used_quota, group` + fork 扩展（`scope, plan_id, disabled_by, plan_exhausted_policy` 等，透传忽略）。
 - 创建 `POST /api/token/`：body 为 token 对象。**该 fork 校验「分组不能为空」**（空体实测返回此错误）。上游字段：`name, group, expired_time, remain_quota, unlimited_quota, model_limits_enabled, model_limits, allow_ips, auto_groups`（fork 扩展可选）。key 由服务端生成，创建响应的 `data.key` 是**唯一一次能看到明文的机会**。
-- 更新 `PUT /api/token/`：body 必须带 `id`（实测空体返回「id 或 userId 为空！」）；语义为整对象更新，须以列表读到的现值为基础改字段后回传。
+- 更新 `PUT /api/token/`：body 必须带 `id`（实测空体返回「id 或 userId 为空！」）；语义为整对象更新，须以列表读到的现值为基础改字段后回传。**【v0.5.0 实施期实测补充】status 字段只在 `?status_only=true` 变体下生效**（上游 `UpdateToken`：普通 PUT 仅更新 name/expired_time/remain_quota/unlimited_quota/model_limits*/allow_ips/group，忽略 status）；启停必须单独发一次 status_only PUT。
 - 删除 `DELETE /api/token/{id}`（实测对不存在 id 返回 `record not found`，路由存在）。
 - 响应统一 `{success, message, data?}`；管理鉴权仍是 `Authorization: Bearer <accessToken>` + `New-Api-User: <userId>` 成对。
 
