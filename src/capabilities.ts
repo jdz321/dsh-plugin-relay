@@ -29,9 +29,15 @@ interface ModelsDevEntry {
   reasoning?: boolean
   reasoning_options?: Array<{ type?: string, values?: string[] } & Record<string, unknown>>
   limit?: { context?: number, output?: number }
+  /** ISO release date (e.g. `2026-03-01`); feeds the preset age window. */
+  release_date?: string
 }
 
-type ModelsDevDoc = Record<string, { models?: Record<string, ModelsDevEntry> }>
+/** The api.json document shape: provider id → { models: name → entry }. */
+export type ModelsDevDoc = Record<string, { models?: Record<string, ModelsDevEntry> }>
+
+/** Exported for the knowledge-preset builder (same shape, no re-declaration). */
+export type ModelsDevDocument = ModelsDevDoc
 
 /** Pick the effort levels a reasoning_options list offers, in pi-ai's order. */
 function effortLevels(options: Array<{ type?: string, values?: string[] }> | undefined): string[] | null {
@@ -112,6 +118,7 @@ export class ModelsDevClient {
   private document: ModelsDevDoc | null = null
   private fetchedAt = 0
   private inflight: Promise<ModelsDevDoc | null> | null = null
+  private refreshInflight: Promise<ModelsDevDoc> | null = null
 
   constructor(options: ModelsDevOptions = {}) {
     this.options = { url: 'https://models.dev/api.json', proxy: null, timeoutMs: 20000, ttlMs: 24 * 60 * 60 * 1000, ...options }
@@ -123,11 +130,7 @@ export class ModelsDevClient {
     if (!this.inflight) {
       this.inflight = (async () => {
         try {
-          const json = this.options.fetchDoc
-            ? await this.options.fetchDoc()
-            : await requestJson({ url: this.options.url, headers: { accept: 'application/json' }, proxy: this.options.proxy, timeoutMs: this.options.timeoutMs })
-          this.document = (json && typeof json === 'object') ? json as ModelsDevDoc : null
-          this.fetchedAt = now()
+          this.document = await this.fetchOnce()
           return this.document
         } catch {
           // Keep the previous document (if any) cached; the UI falls back to
@@ -140,6 +143,30 @@ export class ModelsDevClient {
       })()
     }
     return await this.inflight
+  }
+
+  /** Fetch the document and cache it on success; throws on failure. */
+  private async fetchOnce(): Promise<ModelsDevDoc> {
+    const json = this.options.fetchDoc
+      ? await this.options.fetchDoc()
+      : await requestJson({ url: this.options.url, headers: { accept: 'application/json' }, proxy: this.options.proxy, timeoutMs: this.options.timeoutMs })
+    if (!json || typeof json !== 'object') throw new Error(`invalid document from ${this.options.url}`)
+    this.fetchedAt = (this.options.now ?? Date.now)()
+    this.document = json as ModelsDevDoc
+    return this.document
+  }
+
+  /**
+   * Force a fresh fetch, bypassing the TTL entirely (the 刷新预置 button).
+   * Single-flight like load(); unlike load() a network failure throws so the
+   * caller can surface a retryable error. The cached document stays as-is on
+   * failure — suggest() keeps working with the stale data.
+   */
+  async refresh(): Promise<ModelsDevDoc> {
+    if (!this.refreshInflight) {
+      this.refreshInflight = this.fetchOnce().finally(() => { this.refreshInflight = null })
+    }
+    return await this.refreshInflight
   }
 
   /**

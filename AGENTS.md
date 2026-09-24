@@ -22,7 +22,7 @@
 - **API Keys**：列出/新建/编辑/删除账户 key（名称/分组/分组倍率/额度/有效期/启停，**不含 key 内容**），一键「使用」切换生效 key（禁用 key 附加警告），切换时同步模型目录；创建 key 的明文在宿主侧剥离（「创建并设为生效」走服务端凭据写入，不做复制 key 功能）；
 - **模型**：当前生效 key 可调用的模型（id + 价格 + 分组），三种计价口径；刷新时同步进 dsh 路由目录，**按 id 预合并保留既有字段**；
 - **数据看板/使用日志**：余额 + 近 7 天按模型消耗堆叠图（recharts 打进 client 产物，react 系外置）；面板日志分页/筛选/整形（`other` JSON 解析 `frt`，容错）；
-- **模型能力**：能力配置真源在插件 namespace——**知识库**（按规范模型名：input/reasoning/contextWindow）+ **按面板 id 覆盖**；同步/保存时按「覆盖 → 知识库匹配（精确 → 剥一至两层变体后缀=近似）→ 不触碰」重放到 `llm-pi-ai.providers.relay.models[n].{input,reasoningEfforts,contextWindow}`，只写插件持有配置的字段（官方「模型」页对未配置 id 的手工修改不被冲掉）；↻ 从 models.dev 取默认值（含 limit.context；宿主代理+缓存）；**插件不管理默认模型**（agent-default-model 是用户自己的事）；
+- **模型能力**：能力配置真源在插件 namespace——**知识库**（按规范模型名：input/reasoning/contextWindow）+ **按面板 id 覆盖** + **预置层**（`src/knowledge-preset.generated.ts` 编译期基线，`npm run preset:fetch` 生成：models.dev 主流白名单 ∪ 面板公开 `/api/pricing` 规范化并集，仅收录近 `PRESET_MAX_AGE_DAYS=183` 天内发布的模型（models.dev `release_date`，无日期不合资格），无凭据参与；同名用户条目覆盖预置，「刷新预置」在宿主内存重建、重启回落基线）；同步/保存时按「覆盖 → 知识库（自定义 → 预置；精确 → 剥一至两层变体后缀=近似）→ 不触碰」重放到 `llm-pi-ai.providers.relay.models[n].{input,reasoningEfforts,contextWindow}`，只写插件持有配置的字段（官方「模型」页对未配置 id 的手工修改不被冲掉）；能力保存 = 定向 ops（catalogSet/Delete + overrideSet/Delete 逐条路径操作，删除真实生效）+ 一次修订守卫重放；**UI 控件复用宿主 primitives**（见 §4.6）；**插件不管理默认模型**（agent-default-model 是用户自己的事）；
 - **热生效**：一切写入走 dsh settings/credentials 服务，运行中会话下一次请求立即生效。
 
 ## 2. 仓库结构
@@ -42,11 +42,17 @@
 │  ├─ pricing.ts       # /api/pricing 归一化（三计价口径 + 分组倍率 + vendors）
 │  ├─ catalog.ts       # 目录整形与合并（name=id；同步保留既有字段）
 │  ├─ route-config.ts  # llm-pi-ai 路由 profile 读写（修订守卫重试、能力字段级合并）
-│  ├─ capabilities.ts  # models.dev 客户端（映射/合并/缓存/单飞）
+│  ├─ capabilities.ts  # models.dev 客户端（映射/合并/缓存/单飞/refresh）
+│  ├─ knowledge.ts     # 知识库/覆盖/预置三层派生规则（matchCatalogName 等）
+│  ├─ knowledge-preset.ts             # 预置构建纯逻辑（脚本与运行时共用；白名单在此）
+│  ├─ knowledge-preset.generated.ts   # preset:fetch 产物（入库；头部只有计数）
+│  ├─ capability-ops.ts # POST /capabilities 定向 ops 处理（可测核心）
+│  ├─ preset-tools.ts   # 供 fetch 脚本 import 的构建期聚合导出（→ lib/preset-tools.js）
 │  ├─ http.ts          # HTTP(S) 客户端（超时、可选代理 CONNECT）
-│  └─ client/          # 浏览器设置页（四选项卡；section.tsx / capabilities.tsx / locale.ts / styles.ts …）
+│  └─ client/          # 浏览器设置页（六选项卡；section / capabilities / menu-select / dashboard / logs / locale / styles …）
 ├─ scripts/dev.js      # npm start 开发启动器（强制 DSH_HOME=<仓库>/.dsh-home，默认端口 3098）
 ├─ scripts/dev.d.ts    # dev.js 的类型声明（供 dev-home 测试导入）
+├─ scripts/fetch-knowledge-preset.mjs  # npm run preset:fetch（先 build 再生成预置基线）
 ├─ tests/              # vitest：单测 + fake-settings + mock 中转站面板 + 产物形状/命名审计
 └─ docs/               # WORKLOG、SPEC、发布清单等开发文档
 ```
@@ -56,9 +62,10 @@
 ```sh
 npm install        # @deepseek-ai/dsh 是 devDependency；运行时零 dependencies（schemastery 为 peerDependency）
 npm run typecheck  # tsc --noEmit
-npm run build      # tsdown → lib/index.js（宿主 ESM）+ lib/client.js（浏览器包裹产物）
+npm run build      # tsdown → lib/index.js（宿主 ESM）+ lib/client.js（浏览器包裹产物）+ lib/preset-tools.js（脚本用）
 npm test           # vitest run（mock 面板 + fake-settings，一律不读写真实 .dsh-home）
 npm start          # 开发启动：dsh web --port 3098，DSH_HOME 强制 = <仓库>/.dsh-home；--dsh-home <dir> / --port <n> 可覆盖
+npm run preset:fetch   # 先 build 再拉「面板公开 pricing ∪ models.dev」重新生成 src/knowledge-preset.generated.ts
 ```
 
 改动 src/ 后必须 `npm run build`，再重装/重链 profile；正在运行的 dsh 实例要重启才会加载新宿主产物（client 产物刷新页面即可）。
@@ -91,8 +98,8 @@ DSH_HOME="$PWD/.dsh-home" node_modules/.bin/dsh plugin --profile web add "$PWD"
 - **pi-ai 路由由插件在运行时建立**：首次 `/use` 用一次 `settings.update` 写入 `llm-pi-ai.providers.<route>`（api=openai-completions、baseURL=<连接>/v1、apiKeyEnv=<keyRef>、models=合并目录）。**自定义路由没有 models 列表无法通过 pi-ai 的严格校验，所以不存在「空路由骨架」**——连接保存只镜像已存在路由的连接字段（`ensureRouteProfile`），绝不创建路由。
 - **`modelOverrides` 对本插件不可用**：pi-ai 源码规定 `modelOverrides` 在「带 models 列表的路由」与「内置目录未描述的路由」上都直接 invalid——中转站路由两者皆是。能力配置因此落在 models 条目自身的 `input`/`reasoningEfforts` 字段上（与官方「模型」页同一份条目），字段级合并由 `route-config.ts` 的「读-改-写 + 修订守卫」保证。**语义边界：能力配置跟随条目存在；切换 key 使模型离开目录时，其能力配置随条目一并移除（该模型已不可调用）；同一 key 内的任何同步/刷新永不冲掉存活模型的能力配置与手工字段。**
 - `index.ts` 的 `apply(ctx)`：`ctx.inject(['settings','credentials'])` 里 `installSection` 注册 `relay` namespace（令牌 `role('secret')`）；`ctx.inject(['connection'])` 挂 `/api/relay/*` 路由。全部随插件 fiber 卸载。
-- `client/index.tsx` 经 `window.__ModuleLoader__.load({id, factory})` 注入（tsdown banner/intro/footer 包裹）；`ctx.slots.inject('settings.section', …)` 挂设置区（内部自绘四选项卡）；React 18 由宿主供给（client 产物 externals 只有 react / react/jsx-runtime）。React 18 的 useEffect 依赖里**不要放每次渲染都换 identity 的对象**（否则本地草稿会被重建吞掉）。
-- **内嵌 webview 会吞 `window.prompt/confirm`**：一切需要确认/输入的交互用内联控件 + 两段式按钮。
+- `client/index.tsx` 经 `window.__ModuleLoader__.load({id, factory})` 注入（tsdown banner/intro/footer 包裹）；`ctx.slots.inject('settings.section', …)` 挂设置区（内部自绘六选项卡）；React 18 与 primitives 由宿主供给（client 产物 externals = react 系 + `@deepseek-ai/dsh-client-ui-primitives`，见 §4.6）。React 18 的 useEffect 依赖里**不要放每次渲染都换 identity 的对象**（否则本地草稿会被重建吞掉）。
+- **内嵌 webview 会吞 `window.prompt/confirm`**：一切需要确认的交互用 primitives `Modal`（React 组件，可用）或内联控件；不再用两段式按钮。
 
 ### 4.4 接口信任围栏
 
@@ -101,6 +108,13 @@ DSH_HOME="$PWD/.dsh-home" node_modules/.bin/dsh plugin --profile web add "$PWD"
 ### 4.5 设置页 slot 契约
 
 `settings.section` slot 的注册形状：`ctx.slots.register({name:'settings.section', id:'relay', order:12, label:()=>t('nav'), inject}, Component)`；`inject` 返回 `{scope, t}`，组件经 `props.scope`/`props.t` 消费。locale：`ctx.locale.register(NS, {zh, en})` + `ctx.locale.bind(NS)`；**组件内一律走 bind 出来的翻译函数按当前语言取词**，不要缓存某一语言的字典对象（否则另一语言环境显示错语言）。
+
+### 4.6 宿主供给的浏览器模块（primitives 纪律）
+
+- `@deepseek-ai/dsh-client-ui-primitives` 及一切 `@deepseek-ai/dsh-client-ui-*` **不是 npm 依赖**：宿主把「自己那版」编译产物经冻结模块表（`PLATFORM_MODULES`，0.1.5-rc.2 起含 primitives）供给插件 bundle 的裸 `require`。因此 **npm 侧无法表达「primitives API ≥ X」**——兼容策略 = `engines.dsh` 下限（`>=0.1.5-rc.2`，首个模块表含所需键的宿主）+ 只消费**稳定子集** + 升级宿主后重跑浏览器走查（视觉行为 npm 测试覆盖不到）。
+- **稳定子集**（rc.2 存在、经 diff 实证到 0.1.7-rc.1 仍兼容）：`Button` / `Switch`（label 必填）/ `Pill` / `Tag` / `StateDot` / `Menu`（open/anchor/items/selectedId/onSelect/onClose/align/portal）/ `Modal`（closeLabel 必填）+ `IconChevronDownOutline14`。0.1.7 新增件（settings-form、SegmentedControl、Checkbox 等）**不引入**；若未来出现破坏性漂移，在 `client/menu-select.tsx` 这类包装组件内做能力探测收敛，不在业务代码散落 try/catch。
+- 类型：devDependency 装 `@deepseek-ai/dsh-client-ui-primitives`（**精确锁版**，与 `engines.dsh` 下限对应的宿主版本——npm 线与 dsh 同班次发布，`latest` 标签常年停在 rc.1 不代表没发版；升级 dsh 开发依赖时**同步锁步升级本包**）。运行时真源仍是宿主模块表供给的那版，npm 包只供类型；**禁止把 `deepseek-harness/` 源码 import 进产物或 tsconfig**。`tsdown.config.ts` 的 `CLIENT_EXTERNALS` 与 build-shape 测试的 require 白名单都要含该包名。
+- 下拉一律走 `client/menu-select.tsx` 的 `MenuSelect`（LanguageRow 同款：锚点按钮 + 当前值 + chevron + `Menu` portal）。已知语义：菜单开着按 Escape，菜单关闭的同时**宿主设置面板也会关**（面板自身在 document 层监听 Escape，官方 LanguageRow 同款行为，非本插件缺陷）。
 
 ## 5. 中转站协议事实（new-api 家族）
 
@@ -117,9 +131,9 @@ DSH_HOME="$PWD/.dsh-home" node_modules/.bin/dsh plugin --profile web add "$PWD"
 
 ## 6. 测试与验收
 
-- `npm test`（vitest）：pricing/relay（mock 面板三种方言+vendors）、catalog（name=id、合并保留）、route-config（能力合并/删除/修订守卫重试/同步保留）、capabilities（models.dev 三态映射、缓存单飞）、capabilities-view（浏览器回归：重建不吞草稿）、build-shape（client 包裹形状、宿主 ESM externals、**交付物 `grep -ri relay` 零命中审计**）、dev-home。
+- `npm test`（vitest）：pricing/relay（mock 面板三种方言+vendors）、catalog（name=id、合并保留）、route-config（能力合并/删除/修订守卫重试/同步保留）、capabilities（models.dev 三态映射、缓存单飞、refresh 绕缓存/失败抛错/单飞）、knowledge（含预置层派生：同名覆盖/并集匹配/近似）、knowledge-preset（fixture：白名单/面板规范化/丢弃/并集/release_date 窗口）、capability-ops（定向 ops 路径形状、删除真实生效、重放一次写、坏条目整批拒绝）、capability-draft（entryFromDraft/parseContextWindow 矩阵，K=1024）、build-shape（**vm 沙箱真实加载 client 产物**：捕获 `__ModuleLoader__.load` 定义、调 factory 断言 apply/inject 导出面与 require 白名单——minify 会改写字符串形态，勿用 grep 断言；宿主 ESM externals；**交付物历史专名哨兵零命中审计（哨兵明文见 tests/build-shape.test.ts）**）、dev-home。
 - **隔离 home 的正确做法**：`mkdir` 新目录后 `DSH_HOME=<新目录> node_modules/.bin/dsh plugin --profile web add "$PWD"` 从零安装。**不要 `cp -R` 复制现成 home**（profile bundle 解析会断）。
-- 浏览器验收：隔离实例（`node scripts/dev.js --dsh-home <临时目录> --port 3198`）+ mock 面板（`tests/mock-relay.ts` esbuild bundle 后独立进程跑）+ browser-use / web-gui-tester 技能。走查清单：四 Tab 渲染；连接保存落盘；keys 自动加载无 key 材料；Use 后 active 标签即时出现（竞态回归）；模型表三计价无名称列；能力卡片配置→保存→**settings.yaml 落盘断言**；↻ 联网获取；手工添加/删除；禁用 key 警告；**中英两种界面语言各走查一遍**。**注意：dsh 设置对话框会拦截 playwright locator 的指针点击（actionability 超时），DOM 快照可用；点按钮用 cua 坐标或 dom_cua node 路径，且点击可能被吞，要点后验证状态再重试。**
+- 浏览器验收：隔离实例（`node scripts/dev.js --dsh-home <临时目录> --port 3198 --no-open`）+ mock 面板（`node .tmp/run-mock.mjs <port>`，`tests/mock-relay.ts` 支持固定端口）+ browser-use / web-gui-tester 技能（若 IAB 输入管线失效，可用本机 Chrome headless + 零依赖 CDP 直驱 `Input.dispatchMouseEvent` 兜底）。走查清单：六 Tab 渲染；连接保存落盘；keys 行↔卡（一次一张卡、应用即写、失败不收卡、Modal 删除、启用 Switch）；Use 后 active 标签即时出现（竞态回归）；模型表三计价；看板四卡一行（getBoundingClientRect 断言同行）；日志两行筛选不叠压 + 三个下拉占位文案 + MenuSelect 开/选/关；能力页：预置折叠区可搜、平台卡收起/展开、1M/256K 换算与非法拒绝、完成即存 → **settings.yaml 落盘断言**（含目录删除真实生效）、刷新预置、无全局保存按钮；禁用 key 警告；**中英两种界面语言各走查一遍**。**注意：dsh 设置对话框会拦截 playwright locator 的指针点击（actionability 超时），DOM 快照可用；点按钮用 cua 坐标或 dom_cua node 路径，且点击可能被吞，要点后验证状态再重试。**
 - **涉及真实账号时**：只读调用可随意；`/use` 等改写操作只在隔离 home 测；真实 home 只做只读确认；任何真实账号信息不入报告、不入 git。
 
 ## 7. 改动收尾清单
@@ -136,5 +150,6 @@ DSH_HOME="$PWD/.dsh-home" node_modules/.bin/dsh plugin --profile web add "$PWD"
 - **v0.2.0**：连接信息全部进 Web 设置页；同类中转站通用。
 - **v0.2.1**：修 `npm start` 误用外部 dsh home（home 解析锚定仓库）。
 - **v0.3.0**：纯插件化 npm 包结构（删 CLI）；keys/models UI 重做；`/use` 服务端写竞态修复；自动探测用户 ID 移除。
-- **v0.5.0（当前）**：模型能力知识库 + 匹配规则（真源移入插件 namespace，路由条目能力字段变派生状态；contextWindow 默认值）；**移除默认模型管理**（不写 agent-default-model，文案同步）；账户行精简（用户名 + 余额）；**API key 增删改**（明文剥离 + status_only 启停）；数据看板（recharts 堆叠图，react 系外置、process.env.NODE_ENV 构建期消解）与使用日志页签；dev 启动器 `--no-open`。
 - **v0.4.0**：全面去 vendor 专名化（包名 dsh-plugin-relay / namespace relay / 路由 /api/relay/* / keyRef RELAY_API_KEY）；**删 prettyModelName**（模型只认 id，目录 name=id）；**设置页四选项卡 + 「模型能力」选项卡**（能力写 models 条目的 input/reasoningEfforts，字段级合并 + 修订守卫；models.dev 参考值；手工增删）；**TypeScript 重构**（src/ → tsdown → lib/；宿主 ESM + client CJS 包裹产物；vitest；tsc strict）。
+- **v0.5.0**：模型能力知识库 + 匹配规则（真源移入插件 namespace，路由条目能力字段变派生状态；contextWindow 默认值）；**移除默认模型管理**（不写 agent-default-model，文案同步）；账户行精简（用户名 + 余额）；**API key 增删改**（明文剥离 + status_only 启停）；数据看板（recharts 堆叠图，react 系外置、process.env.NODE_ENV 构建期消解）与使用日志页签；dev 启动器 `--no-open`。
+- **v0.5.1（当前）**：体验修订——key **行内原地编辑**（行↔卡，对齐官方 Models 页；删除走 Modal）；**全面复用宿主 primitives**（Button/Switch/Pill/Tag/StateDot/Menu/Modal + MenuSelect 统一下拉，§4.6 纪律；类型用官方 npm 包精确锁版）；看板四卡一行；日志筛选两行布局 + 下拉占位文案修复；**能力页重构**（预置知识库编译期入库 + `preset:fetch`（仅近 183 天发布的模型）+ 「刷新预置」内存层；上下文 `1M`/`256K` 简写；三区全部原地展开、页级单卡；模型 id 完整单行展示、匹配提示置于 id 下方、摘要两行钳制；编辑卡页脚按钮成组靠右对齐官方；`/capabilities` 改定向 ops——删除真实生效；全局保存按钮移除）；client 产物 minify（2.23MB→0.98MB，recharts 树占 ~78%）。

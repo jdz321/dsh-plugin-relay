@@ -130,6 +130,8 @@ export interface MockRelayOptions {
   modelsForKey1?: string[]
   /** Serve /api/pricing with a vendors list (panel fork extension). */
   withVendors?: boolean
+  /** Fixed listen port (default: random) — for the standalone browser-walkthrough runner. */
+  port?: number
 }
 
 function withinWindow(created: number, query: URLSearchParams): boolean {
@@ -309,7 +311,7 @@ export async function startMockRelay(opts: MockRelayOptions = {}): Promise<MockR
     }
     json(404, { success: false, message: 'not found' })
   })
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+  await new Promise<void>((resolve) => server.listen(opts.port ?? 0, '127.0.0.1', resolve))
   const { port } = server.address() as AddressInfo
   return {
     server,

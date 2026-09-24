@@ -122,6 +122,45 @@ describe('deriveCapabilityFor (override > catalog > none)', () => {
   })
 })
 
+describe('deriveCapabilityFor with the preset layer (user ∪ preset name sets)', () => {
+  const kb: KnowledgeConfig = {
+    capabilityCatalog: { 'deepseek-chat': { reasoning: ['low'] } },
+    capabilityOverrides: {},
+    capabilityPreset: { 'deepseek-chat': { reasoning: false }, 'gpt-6.1': { contextWindow: 400000 } },
+  }
+
+  it('a same-named user entry overrides the preset and reports catalog source', () => {
+    const derived = deriveCapabilityFor('deepseek-chat', kb)
+    expect(derived.source).toBe('catalog')
+    expect(derived.reasoning).toEqual(['low'])
+  })
+
+  it('preset-only names match with preset / preset-approximate sources', () => {
+    expect(deriveCapabilityFor('gpt-6.1', kb)).toMatchObject({ source: 'preset', contextWindow: 400000, catalogName: 'gpt-6.1' })
+    expect(deriveCapabilityFor('gpt-6.1-preview', kb)).toMatchObject({ source: 'preset-approximate', catalogName: 'gpt-6.1' })
+  })
+
+  it('the union name set matches; a nearer user name beats a farther preset name', () => {
+    const mixed: KnowledgeConfig = {
+      capabilityCatalog: { 'foo-bar': { reasoning: false } },
+      capabilityOverrides: {},
+      capabilityPreset: { foo: { reasoning: ['high'] } },
+    }
+    // strip 1 hits user 'foo-bar' before strip 2 would reach preset 'foo'
+    expect(deriveCapabilityFor('foo-bar-x', mixed)).toMatchObject({ source: 'catalog-approximate', catalogName: 'foo-bar' })
+    // exact hits always win over stripped ones, user or preset
+    expect(deriveCapabilityFor('foo', mixed)).toMatchObject({ source: 'preset' })
+  })
+
+  it('overrides still beat the preset layer', () => {
+    const withOverride: KnowledgeConfig = {
+      ...kb,
+      capabilityOverrides: { 'gpt-6.1': { reasoning: false } },
+    }
+    expect(deriveCapabilityFor('gpt-6.1', withOverride)).toMatchObject({ source: 'override', reasoning: false })
+  })
+})
+
 describe('applyDerivedCapabilities (route entry rewrite rules)', () => {
   const kb: KnowledgeConfig = {
     capabilityCatalog: { base: { input: ['text'], reasoning: false, contextWindow: 131072 } },

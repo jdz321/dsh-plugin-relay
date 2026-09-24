@@ -8,6 +8,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Bar, BarChart, CartesianGrid, Legend, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
+import { Button, Pill } from '@deepseek-ai/dsh-client-ui-primitives'
 
 import { apiGet } from './api.js'
 import { tokenCountText, type Translator } from './locale.js'
@@ -121,9 +122,9 @@ export function DashboardTab({ t }: DashboardViewProps): JSX.Element {
           <div className="relay_cardTitle">{t('dashTitle')}</div>
           <p className="relay_metaLine">{t('dashIntro')}</p>
         </div>
-        <button type="button" className="relay_button relay_buttonSecondary relay_buttonSm" disabled={loading} onClick={refresh}>
+        <Button variant="ghost" size="sm" disabled={loading} onClick={refresh}>
           {loading ? t('refreshing') : t('dashRefresh')}
-        </button>
+        </Button>
       </div>
       {data === null ? <div className="relay_empty">{t('loading')}</div> : (
         <>
@@ -152,15 +153,13 @@ export function DashboardTab({ t }: DashboardViewProps): JSX.Element {
               <span className="relay_cardTitle">{t('dashChartTitle')(data.days)}</span>
               <div className="relay_row">
                 {(['cny', 'tokens'] as const).map((candidate) => (
-                  <button
+                  <Pill
                     key={candidate}
-                    type="button"
-                    className={metric === candidate ? 'relay_chip relay_chipOn' : 'relay_chip'}
-                    aria-pressed={metric === candidate}
+                    active={metric === candidate}
                     onClick={() => setMetric(candidate)}
                   >
                     {candidate === 'cny' ? t('dashMetricCny') : t('dashMetricTokens')}
-                  </button>
+                  </Pill>
                 ))}
               </div>
             </div>

@@ -72,6 +72,34 @@ export function normalizeBaseUrlDraft(value: string): string {
   return value.trim().replace(/\/+$/, '')
 }
 
+/** Upper bound the host also enforces (knowledge.ts CONTEXT_WINDOW_MAX). */
+export const CONTEXT_WINDOW_MAX = 10_000_000
+
+const SUFFIX_FACTORS: Record<string, number> = { k: 1024, m: 1024 ** 2, b: 1024 ** 3 }
+
+/**
+ * Parse a context-window text input into tokens. Accepts plain digits plus a
+ * K/M/B suffix (case-insensitive, 1024-based — `1M` = 1,048,576, matching the
+ * `128K = 131072` industry convention); whitespace, commas, and underscores
+ * are ignored (`1_048_576` and `1,048,576` both parse). Returns null for
+ * anything else — decimals, signs, unknown suffixes, 0, or values past
+ * CONTEXT_WINDOW_MAX (the host would reject them anyway).
+ */
+export function parseContextWindow(text: string): number | null {
+  const cleaned = text.replace(/[\s,_]/g, '')
+  const match = /^(\d+)([kKmMbB]?)$/.exec(cleaned)
+  if (!match) return null
+  const factor = match[2] ? SUFFIX_FACTORS[match[2].toLowerCase()]! : 1
+  const value = Number(match[1]) * factor
+  if (!Number.isSafeInteger(value) || value <= 0 || value > CONTEXT_WINDOW_MAX) return null
+  return value
+}
+
+/** `1,048,576`-style grouping for the live conversion hint. */
+export function groupedNumber(n: number): string {
+  return n.toLocaleString('en-US')
+}
+
 /** Quota points → compact CNY estimate (for form hints; 4 decimals trimmed). */
 export function pointsToCnyText(points: number): string {
   return trimNum(points / 500000)

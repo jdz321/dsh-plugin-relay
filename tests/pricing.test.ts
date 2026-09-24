@@ -21,14 +21,14 @@ const NEW_API_BODY = {
     },
   ],
   vendors: [{ id: 4, name: 'DeepSeek' }],
-  group_ratio: { default: 1, vip: 0.8, budget: 0.35 },
+  group_ratio: { default: 1, vip: 0.8, budget: 0.6 },
   usable_group: { default: '默认分组', vip: 'VIP 分组' },
 }
 
 describe('normalizePricing', () => {
   it('shapes all three billing dialects, group ratios and vendors', () => {
     const pricing = normalizePricing(NEW_API_BODY)
-    expect(pricing!.groupRatio['budget']).toBe(0.35)
+    expect(pricing!.groupRatio['budget']).toBe(0.6)
     expect(pricing!.usableGroup.vip).toBe('VIP 分组')
     expect(pricing!.byModel.get('deepseek-v4-pro')!.inputPrice).toBe(9)
     expect(pricing!.byModel.get('deepseek-v4-pro')!.billingMode).toBe('token')

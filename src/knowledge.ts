@@ -30,13 +30,20 @@ export interface CatalogEntry {
 /** One per-panel-id override, keyed by the exact panel model id. */
 export type OverrideEntry = CatalogEntry
 
-/** Both plugin-owned capability structures as stored in the namespace. */
+/**
+ * Both plugin-owned capability structures as stored in the namespace, plus —
+ * since v0.5.1 — the optional preset layer (compiled-in baseline from
+ * `npm run preset:fetch`, replaceable in host memory by 刷新预置). Presets
+ * never persist to settings and have no delete semantics: a same-named user
+ * entry overrides one, which is the only way to suppress a bad preset.
+ */
 export interface KnowledgeConfig {
   capabilityCatalog: Record<string, CatalogEntry>
   capabilityOverrides: Record<string, OverrideEntry>
+  capabilityPreset?: Record<string, CatalogEntry>
 }
 
-export type CapabilitySource = 'override' | 'catalog' | 'catalog-approximate' | null
+export type CapabilitySource = 'override' | 'catalog' | 'catalog-approximate' | 'preset' | 'preset-approximate' | null
 
 /** The capability fields one panel model resolves to, with their origin. */
 export interface DerivedCapability {
@@ -152,7 +159,9 @@ export function matchCatalogName(panelId: string, catalogNames: readonly string[
 
 /**
  * Resolve the effective capability config for one panel model id: override,
- * else knowledge base (exact or stripped-suffix match), else nothing.
+ * else a knowledge-base match (user entries first, then the preset layer)
+ * over the union of both name sets — exact or stripped-suffix match, user
+ * entry winning when both layers carry the matched name.
  */
 export function deriveCapabilityFor(panelId: string, knowledge: KnowledgeConfig): DerivedCapability {
   const override = knowledge.capabilityOverrides[panelId]
@@ -164,14 +173,21 @@ export function deriveCapabilityFor(panelId: string, knowledge: KnowledgeConfig)
       source: 'override',
     }
   }
-  const match = matchCatalogName(panelId, Object.keys(knowledge.capabilityCatalog))
+  const preset = knowledge.capabilityPreset ?? {}
+  const names = [...Object.keys(knowledge.capabilityCatalog), ...Object.keys(preset)]
+  const match = matchCatalogName(panelId, names)
   if (match) {
-    const entry = knowledge.capabilityCatalog[match.name]!
+    const userEntry = knowledge.capabilityCatalog[match.name]
+    const entry = userEntry ?? preset[match.name]!
+    const fromPreset = userEntry === undefined
+    const approximate = match.approximate > 0
     return {
       ...(entry.input !== undefined ? { input: [...entry.input] } : {}),
       ...(entry.reasoning !== undefined ? { reasoning: entry.reasoning } : {}),
       ...(entry.contextWindow !== undefined ? { contextWindow: entry.contextWindow } : {}),
-      source: match.approximate > 0 ? 'catalog-approximate' : 'catalog',
+      source: fromPreset
+        ? (approximate ? 'preset-approximate' : 'preset')
+        : (approximate ? 'catalog-approximate' : 'catalog'),
       catalogName: match.name,
     }
   }

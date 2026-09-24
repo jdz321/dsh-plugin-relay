@@ -154,7 +154,7 @@
 
 ## 2026-09-21/22（v0.4.0 — 去专名化、删 prettyModelName、四 Tab + 模型能力、TypeScript 重构）
 
-按 SPEC 无人值守实施四项需求。包名 → **`dsh-plugin-relay`**，namespace/route/keyRef/pi-ai 路由全部通用化（`relay` / `/api/relay/*` / `RELAY_API_KEY` / `relay`），交付物 `grep -ri relay` 零命中（tests/build-shape.test.ts 内置机械审计）。
+按 SPEC 无人值守实施四项需求。包名 → **`dsh-plugin-relay`**，namespace/route/keyRef/pi-ai 路由全部通用化（`relay` / `/api/relay/*` / `RELAY_API_KEY` / `relay`），交付物历史专名哨兵零命中（tests/build-shape.test.ts 内置机械审计，哨兵明文不落文档）。
 
 ### 1. 去专名化 + 老配置迁移（迁移后于 2026-09-22 按用户决定移除，见下一条）
 
@@ -303,3 +303,75 @@
 
 - v0.4.0 直接写在路由条目上的旧能力字段不会自动迁移进知识库（按 spec 语义保持原样，页面文案已说明）；用户可在能力页对相应 id 建覆盖接管。
 - 看板图表未做 minify（client 2.21MB）；如需可后续加 tsdown minify（改动 build-shape 断言需同步）。
+
+---
+
+## 2026-09-24（v0.5.1 — 体验修订：行内编辑 / primitives / 预置知识库 / 完成即存）
+
+需求（SPEC-0.5.1，调研先行）：R1 key 行内原地编辑（对齐官方 Models 页行↔卡）；R2 复用 dsh primitives + 宿主版本兼容策略；R3 看板四卡一行；R4 日志筛选两行布局 + 下拉占位文案修复；R5 能力页重构（预置知识库 + 统一刷新 + 1M/256K + 平台卡收起 + 完成即存 + /capabilities 改定向 ops）。
+
+### 1. 宿主兼容调研结论（写进了 README/PUBLISHING/AGENTS）
+
+- primitives 等浏览器模块**不经 npm**：宿主把冻结模块表（PLATFORM_MODULES，0.1.5-rc.2 起含 `dsh-client-ui-primitives`）里的自己那版编译产物供给插件 bundle 的裸 require；npm 侧无法表达「API ≥ X」→ 兼容 = engines.dsh 下限（>=0.1.5-rc.2）+ 稳定子集纪律 + 升级后浏览器走查。
+- 跨 tag diff 实证（rc.2 → 0.1.7-rc.1）：本插件消费面 Switch/Pill/Tag/Button 零改动、Menu/Modal 纯增量、StateDot 一致——子集向后兼容。0.1.7 新增件（settings-form、SegmentedControl、Checkbox）不引入。
+- 三方注册表（awesome-dsh-plugin，1000 条）抽查：社区无强兼容机制可抄，「engines 下限 + 稳定子集 + 冒烟」即正确姿势。
+- **rolldown 对「未安装且 neverBundle」的包正确保留裸 require**（spec §11 风险落空）：tsdown CLIENT_EXTERNALS 加包名即可，无需 devDependency；类型最初用 `src/primitives.d.ts` 手写最小声明（props 按 submodule 源码）。**追加轮改用官方类型**：npm 线与 dsh 同班次锁步发布（`latest` 标签停在 rc.1 是 prerelease 不挪 tag 的语义，非未发版；`MenuItemButton` 在 0.1.5-rc.2 tarball 0 处、0.1.7-rc.1 3 处，实证内容随版本演进），devDependency 精确锁 `0.1.5-rc.2` 供类型、删手写 `.d.ts`——typecheck 直接过，产物字节不变；升级 dsh 时须锁步升级该包（PUBLISHING §6 已记）。
+
+### 2. R5 预置知识库（编译期入库 + 运行时内存层）
+
+- `src/knowledge-preset.ts` 纯逻辑（脚本与 /knowledge-refresh 路由共用）：主源 = 面板**公开** `/api/pricing` 的 model_name 经 `matchCatalogName`（与运行时同一规则）规范化；基源 = models.dev 白名单 provider（**api.json 实名核对**：`moonshotai`/`xai`/`zai`，spec 初稿的 moonshot/x-ai/z-ai 拼写不存在）；两源按名并集经 mapModelsDevEntry+mergeSuggestions（contextWindow 取最大）合成条目。
+- `npm run preset:fetch`：先 build 出 `lib/preset-tools.js`（脚本无法直接 import src/*.ts——node type-stripping 不重写 .js 扩展名，改为消费构建产物，对 node 版本零依赖），再拉两源生成 `src/knowledge-preset.generated.ts`（入库；头部只有计数，无面板身份）。实跑：**283 条预置**（白名单 10/10），面板 82 ids → 命中 79、丢弃 3（grok-imagine/grok-video/gpt-image-2.5），宿主产物 72KB → 110KB。
+- 运行时：knowledge.ts 加 `capabilityPreset` 层（用户同名覆盖预置；派生跑「用户 ∪ 预置」名集，source 增 preset/preset-approximate）；`POST /api/relay/knowledge-refresh` 用 `ModelsDevClient.refresh()`（绕 TTL、单飞、失败抛错可重试）+ 同一份并集逻辑重建**宿主内存**层（重启回落编译基线，设计使然）。浏览器实测刷新 263→267（mock 面板源把 deepseek-reasoner 经非白名单 provider 命中带入——panelOnlyNames 路径顺带验证）。
+
+### 3. R5 定向 ops（/capabilities 契约变更）
+
+- body 从整体字典改为 `{catalogSet, catalogDelete, overrideSet, overrideDelete}`；逐条转 `settings.mutate` 路径操作（寻址 `capabilityCatalog.<name>` 等——**删除真实生效**，v0.5.0「深合并下空字典删不掉」问题的根治）；一次 mutate 载全部 ops + 一次修订守卫重放。处理核心抽到 `src/capability-ops.ts`（FakeSettings 可测）。
+- 客户端随之去掉批量 dirty/reconcile 机制（reconcileKbRows/reconcileOverrides 删除，相关测试重写为 capability-draft 纯函数测试）；草稿保留由「一次一张卡 + 提交即写」天然保证（刷新预置不清打开中的草稿实测通过）。
+
+### 4. R1/R2/R3/R4 要点
+
+- key 行↔卡：单一 openKey 状态、行内原地展开（一次一张）、应用即写（busy=保存中…）、失败卡不收 + 卡内透传面板错误、删除/清除一律 primitives Modal；启用/创建并生效用 primitives Switch（label 必填）。
+- MenuSelect（`client/menu-select.tsx`）：LanguageRow 同款（锚点按钮 + 当前值 + chevron + `Menu` portal），全站唯一下拉实现；分组选择器与日志三筛选统一走它。**走查抓到自伤 bug：初版锚点漏写 onClick**（对照官方 LanguageRow 才定位——环境无问题）。
+- 看板四卡：`repeat(4,minmax(0,1fr))` + 数值 16px + 内边距压缩（<480px 回落 2 列）；走查用 getBoundingClientRect 断言四卡同一 y。
+- 日志筛选两行：时间范围独占一行（flex:1 + min-width:0）、三下拉 + 查询/重置第二行；占位文案按字段（全部模型/全部密钥/全部分组）。
+
+### 5. 踩坑与决策记录
+
+- **Escape 双关**：菜单开着按 Escape，primitives Menu 关菜单的同时**宿主设置面板也关**（SettingsPanel 在 document 层监听 Escape，官方 LanguageRow 同款）——上游设计，保持与官方一致，不改（AGENTS §4.6 记录）。
+- **IAB 输入管线故障**：browser-use 走查中途 reload 后 IAB 对 CDP 输入全面无响应（trusted 事件到不了页面，官方 UI 同样点不动）——环境级故障。兜底：本机 Chrome headless（CDP 9223）+ 零依赖 WebSocket 直驱 `Input.dispatchMouseEvent` 完成全部走查与截图；`mock-relay.ts` 加 `port` 选项支持独立进程。此兜底路径已写进 AGENTS §6。
+- 预置脚本读面板地址只解析 `.dsh-home/settings.yaml` 的 `relay.baseUrl` 一个字段（手写 mini 解析，不引依赖、不碰凭据）。
+- `/api/relay/model-info` 路由保留（客户端逐行 ↻ 已删，宿主 API 面保留不破坏）；对应 locale 键清理。
+- K=1024 约定与个别厂商十进制容量（200K=200000）有 2.4% 级偏差——实时换算 hint 让所见即所存（README 已知限制写明）。
+
+### 6. 验收证据
+
+- 单测 **117/117**（新增 parseContextWindow 矩阵/预置构建 fixture/定向 ops/refresh 语义；重写 capability-draft）；typecheck 0 error；build 三产物（index 110KB / client 2.23MB / preset-tools 14KB）；build-shape 白名单 + primitives 裸 require 断言。
+- 浏览器（隔离 home 从零 add + mock 面板 + Chrome CDP）：中英 × 六页签全走查。关键断言：MenuSelect 开/选/外点关；key 行内编辑应用后行更新（分组 default→vip）+ status 通告；Modal 删除（3 行→2 行）；看板四卡同行；日志占位文案 + 筛选（gpt-4o-mini → 共 1 条）+ 重置；能力页平台卡收起（预置徽标 + vendor）、1M hint（`1M = 1,048,576`）、10M 拒绝、完成即存 → **settings.yaml 落盘**（override 262144 + reasoningEfforts 重放 + maxTokens/compat 保留）、清除覆盖后 capabilityOverrides 清空、知识库条目增删（dict 删除真实生效）、预置折叠区过滤（263→21）、刷新预置成功（267）、无全局保存按钮。
+- 真实账号：只读对账 `/api/user/models` vs `/api/pricing` 双向零差集（82=82，预置主源等价性再确认）；`preset:fetch` 实跑（令牌零参与）；`dsh-temp-` 临时 key 创建→改名/减额→status_only 禁用（status=2 且 quota 保持）→删除，面板无残留，既有 key 未触碰。
+- 截图 12 张重拍（六页签 × 中英，mock 虚构数据）入 assets；screenshots.json 不变（6 张英文）。
+
+### 7. 遗留
+
+- 刷新预置的**失败路径**在浏览器端未现场复现（当次 models.dev 直连恰好可达）：错误文案与可重试行为由单测（refresh 失败抛错）+ locale 键保证；后续走查可断网复验。
+- IAB 输入管线故障原因未深究（疑似宿主 app 级状态）；CDP 兜底路径已文档化。
+
+### 8. v0.5.1 追加轮（同日，操作者体验反馈六项）
+
+1. **client 产物体积**：sourcemap 归因——recharts 及其依赖树（es-toolkit/redux toolkit/immer/decimal.js/reselect/redux/react-redux）占 ~78%，自身代码 19%。根因是 v0.5.0 起 client 产物从未 minify。tsdown client 配置加 `minify: true`：**2.23MB → 982KB（gzip 233KB）**。minify 会把引号规范成反引号、require 改名为形参——build-shape 的字符串断言全部失效，重写为 **vm 沙箱真实加载**：执行产物、捕获 `__ModuleLoader__.load` 定义、调 factory(fakeRequire)，断言 `apply/inject` 导出面与 require 白名单（恰好 react 系 + primitives，`react-dom/client` 被 tree-shake 不再请求）。
+2. **预置 6 个月窗口**：models.dev 条目 100% 带 `release_date`（白名单 286/286），`buildPresetEntries` 加 `options.now` + `PRESET_MAX_AGE_DAYS=183`，同名取跨 provider 最新日期、无日期不合资格；测试 fixture 固定 now 保证确定性。实跑重生成：**283 → 98 条**，产物 42.9KB → 17.2KB。注意 `preset:fetch` 必须**收尾再 build 一次**（脚本在 build 之后才改 generated.ts，否则 lib/index.js 还是旧基线——浏览器首验即踩）。
+3. **能力页三区原地展开**：页级单卡 `openCard={section,key}`（官方 `editing` 习语）；我的条目「新增」= 列表顶部建卡；预置行「编辑」= 原地展开复制卡（完成存为自定义条目）；平台行不变。按钮统一：行内编辑/删除一律 outline sm 右缘（与 keys 行一致、对齐官方 secondaryButton）；编辑卡页脚一律 outline 取消在左 + primary 在右；keys 页同步统一。刷新按钮移入预置折叠面板工具行。
+4. **名称完整单行 + 匹配提示下移**：`.relay_capId` 强制 nowrap 且**不截断**（操作者反馈名称必须展示完全；去掉首版的 ellipsis），`.relay_capMatch` 允许换行、置于 `.relay_capNameCell`（id 上、`匹配：…` 下）；挤压量由摘要吸收（`-webkit-line-clamp:2` 两行钳制，真实环境最长 id `deepseek-v4-flash-vision-exp` 28 字符实测完整单行、摘要恰 2 行）。编辑卡页脚对齐官方 `editorActions`（`justify-content:flex-end`：取消+主按钮成组靠右，PlatformCard 的「清除覆盖」以 `margin-right:auto` 独占左侧）；预置工具行按钮 `flex:none+nowrap`（首版选择器 `.relay_presetToolbar .relay_button` 落空——primitives Button 不带 relay_ 类，「刷新预置」曾被压成竖排换行）。
+5. **浏览器回归（mock）**：三区原地开/关、页级单卡互斥（disabled 态）、预置工具行在面板内、1M/256K hint、完成即存落盘 + 清除落盘、Modal 删除闭环全过；重拍 zh/en capabilities + keys 截图。真实账号的目标 key（隔离 home:3298）：切换同步 28 模型，平台行 28 条全部单行、匹配提示全部正确置下（24 预置 + 1 近似 + 3 未配置；vendor 徽标 DeepSeek/智谱/Moonshot/小米/MiniMax/阿里巴巴），真实覆盖写 1M 落盘断言 + 清除恢复全过。
+6. **CDP 走查工具演进**：Chrome 153 对 `<details>` 折叠内容保留布局（rects 非零但不可命中）+ 设置对话框 position:fixed 使 offsetParent 恒 null + scrollIntoView 平滑滚动导致测量过期——clickText 最终形态 = elementFromPoint 全量评分（可选先滚动）+ 稳定点复验（350ms 沉降后重测并确认命中）。
+
+### 9. 设置区导航图标（结论：宿主限制，插件侧无扩展点）
+
+操作者反馈中转站与通用设置图标相同，希望独立图标。实证：设置导航图标由壳硬编码——`ui-settings-general/src/client/SettingsRoot.tsx` 的 `navIcon(id)` 只认 `models`/`agent-presets`/`plugins`（rc.2；0.1.7-rc.1 另加 `account`/`archived-sessions`），其余 id（含 `general` 与插件 id）一律回落齿轮；`settings.section` slot 契约（ui-settings/src/client/contract/slots.ts）仅声明 `id/order/label`，**没有 icon 位**。上游 GitHub Discussion #3162 同结论。可行路径：向上游提 PR 给 `navIcon` 加 relay 映射（建议用 rc.2 图标集自带的 `IconApiOutline14`，语义贴合中转站；注意 0.1.7 已整体换 Medium 系图标）。patch 建议文本与讨论链接已记 `docs/local.md`。插件侧不做投机字段（slot 加多余 icon 键宿主直接忽略，无当前效果）。
+
+### 10. 公开文件脱敏复审（提交前）
+
+操作者要求公开文档/文件不得出现历史专名、本地环境与账号信息。复审与处置：
+- 命名审计哨兵的明文（AGENTS/SPEC-0.4.0/WORKLOG 叙述 + build-shape 测试 needle）全部中性化为「历史专名哨兵」，needle 在测试内拼接构造、不再自曝；审计 FILES 范围从 6 项扩到 14 项（覆盖 README.zh/CHANGELOG/AGENTS/WORKLOG/三份 SPEC/PUBLISHING），机制可持续守住。
+- `tests/pricing.test.ts` 的 pricing fixture 的分组名（v0.5.0 起借用真实分组名、倍率同真实参数）改为中性 `budget`/0.6。
+- WORKLOG 中真实 key 名改为「目标 key」。`docs/local.md` 为 gitignored 本机备忘，不受影响。
+- 复验：`git grep` 全跟踪文件对专名/真实 key 名/用户 ID/面板地址/真实余额快照零命中（dashboard fixture 余额同步改值）；118/118 全绿。

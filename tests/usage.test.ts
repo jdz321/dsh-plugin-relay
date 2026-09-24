@@ -124,7 +124,7 @@ describe('buildDashboardView', () => {
 
   it('assembles cards from self and today stat, tokens counted from today buckets', () => {
     const view = buildDashboardView({
-      self: { quota: 61_105_000, used_quota: 300_145_000, request_count: 128 },
+      self: { quota: 25_500_000, used_quota: 300_145_000, request_count: 128 },
       todayStatQuota: 9_664,
       buckets: [
         { date: today, model: 'deepseek-chat', quota: 0.02, tokens: 350 },

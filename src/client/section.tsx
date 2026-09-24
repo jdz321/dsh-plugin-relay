@@ -3,11 +3,14 @@
  * 使用日志 / 模型能力) over the host plugin's `relay` namespace and
  * /api/relay/* routes. The keys tab creates, edits, and deletes keys through
  * the host's /api/relay/keys-* routes — key material never crosses to the
- * browser. All confirmations are inline two-step controls (embedded
- * webviews swallow window.confirm).
+ * browser. Since v0.5.1 the keys tab follows the official Models page row↔card
+ * interaction: one row per key, 「编辑」 expands that row in place into an
+ * editor card (one card open at a time), Apply writes immediately, failures
+ * keep the card open, and deletions go through a primitives Modal.
  */
 
 import { useCallback, useEffect, useState, useSyncExternalStore } from 'react'
+import { Button, Modal, StateDot, Switch, Tag } from '@deepseek-ai/dsh-client-ui-primitives'
 
 import { apiGet, apiPost } from './api.js'
 import { CapabilitiesView, type CapData, type ModelsData } from './capabilities.js'
@@ -23,6 +26,7 @@ import {
 } from './format.js'
 import { LogsTab } from './logs.js'
 import type { Translator } from './locale.js'
+import { MenuSelect } from './menu-select.js'
 
 export interface ScopeSnapshot {
   value?: Record<string, unknown>
@@ -51,7 +55,7 @@ interface StateView {
   modelCount?: number
 }
 
-interface KeyRow {
+export interface KeyRow {
   id: number | string
   name: string
   enabled: boolean
@@ -82,8 +86,8 @@ function errText(err: unknown): string {
   return err instanceof Error ? err.message : String(err)
 }
 
-/** Draft of the inline create/edit key form. */
-interface KeyForm {
+/** Draft of the inline create/edit key card. */
+export interface KeyForm {
   mode: 'create' | 'edit'
   id?: number | string
   name: string
@@ -116,10 +120,10 @@ export function RelaySection(props: SectionEnv): JSX.Element {
   const [models, setModels] = useState<ModelsData | null>(null)
   const [modelsBusy, setModelsBusy] = useState(false)
   const [caps, setCaps] = useState<CapData | null>(null)
-  const [keyForm, setKeyForm] = useState<KeyForm | null>(null)
-  const [keyBusy, setKeyBusy] = useState(false)
-  /** Pending two-click delete confirmation (key id). */
-  const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null)
+  /** The one open key card: an edit target id, 'create', or none. */
+  const [openKey, setOpenKey] = useState<string | null>(null)
+  /** Key pending deletion (Modal target). */
+  const [deleteTarget, setDeleteTarget] = useState<KeyRow | null>(null)
   const [deleteBusy, setDeleteBusy] = useState(false)
 
   useEffect(() => {
@@ -222,58 +226,8 @@ export function RelaySection(props: SectionEnv): JSX.Element {
     }
   }
 
-  const openCreateForm = (): void => {
-    setKeyForm({
-      mode: 'create',
-      name: '',
-      group: '',
-      unlimitedQuota: false,
-      remainQuota: '500000',
-      expireNever: true,
-      expireDate: dateInputValue(Math.floor(Date.now() / 1000) + 30 * 86400),
-      enabled: true,
-      setAsActive: false,
-    })
-  }
-
-  const openEditForm = (key: KeyRow): void => {
-    setKeyForm({
-      mode: 'edit',
-      id: key.id,
-      name: key.name ?? '',
-      group: key.group ?? '',
-      unlimitedQuota: key.unlimited === true,
-      remainQuota: String(key.remainPoints ?? 0),
-      expireNever: key.neverExpires !== false,
-      expireDate: (key.expiredTime ?? 0) > 0 ? dateInputValue(key.expiredTime ?? 0) : dateInputValue(Math.floor(Date.now() / 1000) + 30 * 86400),
-      enabled: key.enabled,
-      setAsActive: false,
-    })
-  }
-
-  /** Validate the form locally; returns the error text or null. */
-  function keyFormError(form: KeyForm): string | null {
-    if (!form.name.trim()) return `${t('keyName')}: ${t('keyNamePlaceholder')}`
-    if (!form.group.trim()) return t('keyGroupRequired')
-    if (!form.unlimitedQuota) {
-      const points = Number(form.remainQuota)
-      if (!Number.isInteger(points) || points < 0) return `${t('keyQuota')}: ${t('quotaPointsPlaceholder')}`
-    }
-    if (!form.expireNever) {
-      const seconds = endOfDaySeconds(form.expireDate)
-      if (!Number.isFinite(seconds) || seconds <= 0) return t('keyExpiry')
-    }
-    return null
-  }
-
-  const submitKeyForm = async (): Promise<void> => {
-    if (keyForm === null) return
-    const problem = keyFormError(keyForm)
-    if (problem !== null) {
-      setMessage({ ok: false, text: problem })
-      return
-    }
-    const form = keyForm
+  /** Create/edit submission: runs the request, refreshes, and reports. */
+  const submitKeyForm = async (form: KeyForm): Promise<{ ok: boolean, error?: string }> => {
     const expiredTime = form.expireNever ? EXPIRED_FOREVER : endOfDaySeconds(form.expireDate)
     const payload = {
       name: form.name.trim(),
@@ -282,46 +236,41 @@ export function RelaySection(props: SectionEnv): JSX.Element {
       remainQuota: form.unlimitedQuota ? 0 : Number(form.remainQuota),
       expiredTime,
     }
-    setKeyBusy(true)
-    setMessage(null)
+    let ok = false
+    let error = ''
     try {
       if (form.mode === 'create') {
         const body = await apiPost('/api/relay/keys-create', { ...payload, setAsActive: form.setAsActive })
         if (body.ok) {
+          ok = true
           const name = String((body.key as Record<string, unknown>)?.name ?? payload.name)
           const warn = Array.isArray(body.warnings) && body.warnings.length ? `\n${(body.warnings as string[]).join('\n')}` : ''
           setMessage({ ok: true, text: (form.setAsActive && body.switched === true ? t('keyCreatedSwitched')(name) : t('keyCreated')(name)) + warn })
-          setKeyForm(null)
         } else {
-          setMessage({ ok: false, text: t('actionFail')(String(body.error ?? '?')) })
+          error = String(body.error ?? '?')
         }
       } else {
         const body = await apiPost('/api/relay/keys-update', { id: form.id, ...payload, enabled: form.enabled })
         if (body.ok) {
+          ok = true
           setMessage({ ok: true, text: t('keyUpdated') })
-          setKeyForm(null)
         } else {
-          setMessage({ ok: false, text: t('actionFail')(String(body.error ?? '?')) })
+          error = String(body.error ?? '?')
         }
       }
     } catch (err) {
-      setMessage({ ok: false, text: t('actionFail')(errText(err)) })
-    } finally {
-      setKeyBusy(false)
-      refreshKeys()
-      refreshState()
-      refreshModels()
-      refreshCaps()
+      error = errText(err)
     }
+    refreshKeys()
+    refreshState()
+    refreshModels()
+    refreshCaps()
+    return ok ? { ok } : { ok: false, error }
   }
 
-  const deleteKey = async (key: KeyRow): Promise<void> => {
-    const id = String(key.id)
-    if (deleteConfirm !== id) {
-      setDeleteConfirm(id)
-      return
-    }
-    setDeleteConfirm(null)
+  const deleteKey = async (): Promise<void> => {
+    const key = deleteTarget
+    if (key === null) return
     setDeleteBusy(true)
     setMessage(null)
     try {
@@ -336,6 +285,7 @@ export function RelaySection(props: SectionEnv): JSX.Element {
       setMessage({ ok: false, text: t('actionFail')(errText(err)) })
     } finally {
       setDeleteBusy(false)
+      setDeleteTarget(null)
       refreshKeys()
       refreshState()
     }
@@ -367,7 +317,7 @@ export function RelaySection(props: SectionEnv): JSX.Element {
           {t('statusLine')(state.modelCount ?? 0, state.selectedKeyName || t('notSet'))}
         </p>
       )}
-      {message !== null && <div className={message.ok ? 'relay_msg relay_msgOk' : 'relay_msg relay_msgErr'}>{message.text}</div>}
+      {message !== null && <div className={message.ok ? 'relay_msg relay_msgOk' : 'relay_msg relay_msgErr'} role="status" aria-live="polite">{message.text}</div>}
       {readOnly && <p className="relay_metaLine">{t('readOnlyHint')}</p>}
 
       <div className="relay_tabs" role="tablist">
@@ -421,14 +371,14 @@ export function RelaySection(props: SectionEnv): JSX.Element {
           </label>
           <div className="relay_rowEnd">
             {draftDirty && <span className="relay_metaLine">{t('dirtyHint')}</span>}
-            <button
-              type="button"
-              className="relay_button relay_buttonPrimary"
+            <Button
+              variant="primary"
+              size="sm"
               disabled={readOnly || !draftDirty || saving}
               onClick={() => { void saveDraft() }}
             >
               {saving ? t('saving') : t('save')}
-            </button>
+            </Button>
           </div>
         </div>
       )}
@@ -441,83 +391,91 @@ export function RelaySection(props: SectionEnv): JSX.Element {
                 <div className="relay_cardTitle">{t('keysTitle')}</div>
                 <p className="relay_metaLine">{accountLine}</p>
               </div>
-              <button
-                type="button"
-                className="relay_button relay_buttonSecondary relay_buttonSm"
-                disabled={keysBusy}
-                onClick={refreshKeys}
-              >
-                {keysBusy ? t('refreshing') : t('refresh')}
-              </button>
+              <span className="relay_row">
+                <Button variant="ghost" size="sm" disabled={keysBusy} onClick={refreshKeys}>
+                  {keysBusy ? t('refreshing') : t('refresh')}
+                </Button>
+                <Button variant="outline" size="sm" disabled={readOnly || openKey !== null} onClick={() => setOpenKey('create')}>
+                  + {t('keyCreate')}
+                </Button>
+              </span>
             </div>
             {keys === null ? <div className="relay_empty">{t('loading')}</div>
               : !keys.ok ? <div className="relay_msg relay_msgErr">{setupHintFor(String(keys.error ?? ''), t) ?? `${t('keysLoadFail')}: ${String(keys.error ?? '')}`}</div>
-              : (keys.keys ?? []).length === 0 ? <div className="relay_empty">{t('keysEmpty')}</div>
-              : (keys.keys ?? []).map((key) => (
-                <div key={String(key.id)} className="relay_tabPane" style={{ gap: 4 }}>
-                  <div className="relay_keyRow">
-                    <div className="relay_keyMain">
-                      <span className="relay_keyName">
-                        {String(key.name ?? '')}
-                        {' '}
-                        {key.selected ? <span className="relay_tag relay_tagOk">{t('selectedTag')}</span> : null}
-                        {key.selected && !key.enabled ? ' ' : ''}
-                        {key.enabled ? null : <span className="relay_tag relay_tagBad">{t('disabledTag')}</span>}
-                      </span>
-                      <span className="relay_keyMeta">{keyMetaText(key, t)}</span>
-                    </div>
-                    <span className="relay_row">
-                      <button
-                        type="button"
-                        className="relay_button relay_buttonSecondary relay_buttonSm"
-                        disabled={useBusy !== null || readOnly}
-                        onClick={() => { void useKey(key) }}
-                      >
-                        {useBusy === String(key.name ?? '') ? t('using') : t('useKey')}
-                      </button>
-                      <button
-                        type="button"
-                        className="relay_button relay_buttonSecondary relay_buttonSm"
-                        disabled={keyBusy || deleteBusy || readOnly}
-                        onClick={() => openEditForm(key)}
-                      >
-                        {t('keyEdit')}
-                      </button>
-                      <button
-                        type="button"
-                        className="relay_button relay_buttonSecondary relay_buttonSm"
-                        disabled={keyBusy || deleteBusy || readOnly}
-                        onClick={() => { void deleteKey(key) }}
-                      >
-                        {deleteConfirm === String(key.id) ? t('keyDeleteConfirm') : t('keyDelete')}
-                      </button>
-                    </span>
-                  </div>
-                  {key.selected && deleteConfirm === String(key.id) && (
-                    <p className="relay_metaLine">{t('keyDeleteActiveHint')}</p>
+              : (keys.keys ?? []).length === 0 && openKey !== 'create' ? <div className="relay_empty">{t('keysEmpty')}</div>
+              : (
+                <div className="relay_keyList">
+                  {openKey === 'create' && (
+                    <KeyCard
+                      form={newKeyForm()}
+                      groups={keys.groups ?? {}}
+                      t={t}
+                      readOnly={readOnly}
+                      submit={submitKeyForm}
+                      onCancel={() => setOpenKey(null)}
+                      onDone={() => setOpenKey(null)}
+                    />
                   )}
+                  {(keys.keys ?? []).map((key) => {
+                    const editing = openKey !== null && openKey !== 'create' && openKey === String(key.id)
+                    if (editing) {
+                      return (
+                        <KeyCard
+                          key={`edit:${String(key.id)}`}
+                          form={editKeyForm(key)}
+                          groups={keys.groups ?? {}}
+                          t={t}
+                          readOnly={readOnly}
+                          submit={submitKeyForm}
+                          onCancel={() => setOpenKey(null)}
+                          onDone={() => setOpenKey(null)}
+                        />
+                      )
+                    }
+                    return (
+                      <div key={String(key.id)} className="relay_keyRow">
+                        <StateDot state={key.enabled ? 'done' : 'error'} />
+                        <div className="relay_keyMain">
+                          <span className="relay_keyName">
+                            {String(key.name ?? '')}
+                            {' '}
+                            {key.selected ? <Tag tone="solid">{t('selectedTag')}</Tag> : null}
+                            {key.enabled ? null : <Tag tone="danger">{t('disabledTag')}</Tag>}
+                          </span>
+                          <span className="relay_keyMeta">{keyMetaText(key, t)}</span>
+                        </div>
+                        <span className="relay_row">
+                          <Button variant="outline" size="sm" disabled={useBusy !== null || readOnly} onClick={() => { void useKey(key) }}>
+                            {useBusy === String(key.name ?? '') ? t('using') : t('useKey')}
+                          </Button>
+                          <Button variant="outline" size="sm" disabled={useBusy !== null || readOnly} onClick={() => setOpenKey(String(key.id))}>
+                            {t('keyEdit')}
+                          </Button>
+                          <Button variant="outline" size="sm" disabled={useBusy !== null || readOnly || deleteBusy} onClick={() => setDeleteTarget(key)}>
+                            {t('keyDelete')}
+                          </Button>
+                        </span>
+                      </div>
+                    )
+                  })}
                 </div>
-              ))}
+              )}
           </div>
-          {keys?.ok && (
-            keyForm === null ? (
-              <div className="relay_rowEnd">
-                <button type="button" className="relay_button relay_buttonSecondary" disabled={readOnly} onClick={openCreateForm}>
-                  + {t('keyCreate')}
-                </button>
-              </div>
-            ) : (
-              <KeyFormView
-                form={keyForm}
-                t={t}
-                groups={keys?.groups ?? {}}
-                busy={keyBusy}
-                onChange={(changes) => setKeyForm((current) => (current === null ? current : { ...current, ...changes }))}
-                onSubmit={() => { void submitKeyForm() }}
-                onCancel={() => setKeyForm(null)}
-              />
-            )
-          )}
+          <Modal
+            open={deleteTarget !== null}
+            onClose={() => { if (!deleteBusy) setDeleteTarget(null) }}
+            title={deleteTarget !== null ? t('keyDeleteTitle')(String(deleteTarget.name ?? '')) : ''}
+            closeLabel={t('close')}
+            description={deleteTarget !== null && deleteTarget.selected ? t('keyDeleteActiveDesc') : t('keyDeleteDesc')}
+            footer={(
+              <>
+                <Button variant="outline" disabled={deleteBusy} onClick={() => setDeleteTarget(null)}>{t('cancel')}</Button>
+                <Button variant="primary" disabled={deleteBusy} onClick={() => { void deleteKey() }}>
+                  {deleteBusy ? t('keySaving') : t('keyDelete')}
+                </Button>
+              </>
+            )}
+          />
         </div>
       )}
 
@@ -528,14 +486,9 @@ export function RelaySection(props: SectionEnv): JSX.Element {
               <div className="relay_cardTitle">{t('modelsTitle')}</div>
               <p className="relay_metaLine">{t('modelsIntro')}</p>
             </div>
-            <button
-              type="button"
-              className="relay_button relay_buttonSecondary relay_buttonSm"
-              disabled={modelsBusy}
-              onClick={refreshModels}
-            >
+            <Button variant="ghost" size="sm" disabled={modelsBusy} onClick={refreshModels}>
               {modelsBusy ? t('refreshing') : t('refresh')}
-            </button>
+            </Button>
           </div>
           {models === null ? <div className="relay_empty">{t('loading')}</div>
             : !models.ok ? <div className="relay_msg relay_msgErr">{setupHintFor(String(models.error ?? ''), t) ?? `${t('modelsLoadFail')}: ${String(models.error ?? '')}`}</div>
@@ -577,19 +530,86 @@ export function RelaySection(props: SectionEnv): JSX.Element {
   )
 }
 
-/** Inline create/edit key form (two-column grid; panel groups as options). */
-function KeyFormView(props: {
+function newKeyForm(): KeyForm {
+  return {
+    mode: 'create',
+    name: '',
+    group: '',
+    unlimitedQuota: false,
+    remainQuota: '500000',
+    expireNever: true,
+    expireDate: dateInputValue(Math.floor(Date.now() / 1000) + 30 * 86400),
+    enabled: true,
+    setAsActive: false,
+  }
+}
+
+function editKeyForm(key: KeyRow): KeyForm {
+  return {
+    mode: 'edit',
+    id: key.id,
+    name: key.name ?? '',
+    group: key.group ?? '',
+    unlimitedQuota: key.unlimited === true,
+    remainQuota: String(key.remainPoints ?? 0),
+    expireNever: key.neverExpires !== false,
+    expireDate: (key.expiredTime ?? 0) > 0 ? dateInputValue(key.expiredTime ?? 0) : dateInputValue(Math.floor(Date.now() / 1000) + 30 * 86400),
+    enabled: key.enabled,
+    setAsActive: false,
+  }
+}
+
+/** Validate the card locally; returns the error text or null. */
+function keyFormError(form: KeyForm, t: Translator): string | null {
+  if (!form.name.trim()) return `${t('keyName')}: ${t('keyNamePlaceholder')}`
+  if (!form.group.trim()) return t('keyGroupRequired')
+  if (!form.unlimitedQuota) {
+    const points = Number(form.remainQuota)
+    if (!Number.isInteger(points) || points < 0) return `${t('keyQuota')}: ${t('quotaPointsPlaceholder')}`
+  }
+  if (!form.expireNever) {
+    const seconds = endOfDaySeconds(form.expireDate)
+    if (!Number.isFinite(seconds) || seconds <= 0) return t('keyExpiry')
+  }
+  return null
+}
+
+/**
+ * The in-place create/edit key card. Holds its own draft (survives list
+ * refreshes), shows validation and panel errors inside the card, and stays
+ * open until Apply succeeds.
+ */
+function KeyCard(props: {
   form: KeyForm
-  t: Translator
   groups: Record<string, string>
-  busy: boolean
-  onChange: (changes: Partial<KeyForm>) => void
-  onSubmit: () => void
+  t: Translator
+  readOnly: boolean
+  submit: (form: KeyForm) => Promise<{ ok: boolean, error?: string }>
   onCancel: () => void
+  onDone: () => void
 }): JSX.Element {
-  const { form, t, groups, busy, onChange, onSubmit, onCancel } = props
+  const { form: initial, groups, t, submit, onCancel, onDone } = props
+  const [form, setForm] = useState<KeyForm>(initial)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const onChange = (changes: Partial<KeyForm>): void => setForm((current) => ({ ...current, ...changes }))
+
+  const apply = async (): Promise<void> => {
+    const problem = keyFormError(form, t)
+    if (problem !== null) {
+      setError(problem)
+      return
+    }
+    setBusy(true)
+    setError(null)
+    const result = await submit(form)
+    setBusy(false)
+    if (result.ok) onDone()
+    else setError(t('actionFail')(String(result.error ?? '?')))
+  }
+
   return (
-    <div className="relay_form">
+    <div className="relay_editCard">
       <div className="relay_formGrid">
         <label className="relay_field">
           <span className="relay_fieldLabel">{t('keyName')}</span>
@@ -601,15 +621,16 @@ function KeyFormView(props: {
             onChange={(e) => onChange({ name: e.target.value })}
           />
         </label>
-        <label className="relay_field">
+        <div className="relay_field">
           <span className="relay_fieldLabel">{t('keyGroup')}</span>
-          <select className="relay_select" value={form.group} disabled={busy} onChange={(e) => onChange({ group: e.target.value })}>
-            <option value="">{t('keyGroupEmptyOption')}</option>
-            {Object.entries(groups).map(([name, description]) => (
-              <option key={name} value={name}>{description ? `${name}（${description}）` : name}</option>
-            ))}
-          </select>
-        </label>
+          <MenuSelect
+            value={form.group}
+            placeholder={t('keyGroupEmptyOption')}
+            items={Object.entries(groups).map(([name, description]) => ({ id: name, label: description ? `${name}（${description}）` : name }))}
+            disabled={busy}
+            onSelect={(id) => onChange({ group: id })}
+          />
+        </div>
         <div className="relay_field">
           <span className="relay_fieldLabel">{t('keyQuota')}</span>
           <div className="relay_radioRow">
@@ -617,7 +638,7 @@ function KeyFormView(props: {
               <input
                 type="radio"
                 className="relay_radio"
-                name="relay-quota-mode"
+                name={`relay-quota-mode-${form.mode}-${String(form.id ?? '')}`}
                 checked={form.unlimitedQuota}
                 disabled={busy}
                 onChange={() => onChange({ unlimitedQuota: true })}
@@ -628,7 +649,7 @@ function KeyFormView(props: {
               <input
                 type="radio"
                 className="relay_radio"
-                name="relay-quota-mode"
+                name={`relay-quota-mode-${form.mode}-${String(form.id ?? '')}`}
                 checked={!form.unlimitedQuota}
                 disabled={busy}
                 onChange={() => onChange({ unlimitedQuota: false })}
@@ -661,7 +682,7 @@ function KeyFormView(props: {
               <input
                 type="radio"
                 className="relay_radio"
-                name="relay-expiry-mode"
+                name={`relay-expiry-mode-${form.mode}-${String(form.id ?? '')}`}
                 checked={form.expireNever}
                 disabled={busy}
                 onChange={() => onChange({ expireNever: true })}
@@ -672,7 +693,7 @@ function KeyFormView(props: {
               <input
                 type="radio"
                 className="relay_radio"
-                name="relay-expiry-mode"
+                name={`relay-expiry-mode-${form.mode}-${String(form.id ?? '')}`}
                 checked={!form.expireNever}
                 disabled={busy}
                 onChange={() => onChange({ expireNever: false })}
@@ -694,37 +715,26 @@ function KeyFormView(props: {
       </div>
       <div className="relay_row">
         {form.mode === 'edit' && (
-          <label className="relay_checkRow">
-            <input
-              type="checkbox"
-              className="relay_checkbox"
-              checked={form.enabled}
-              disabled={busy}
-              onChange={(e) => onChange({ enabled: e.target.checked })}
-            />
+          <span className="relay_checkRow">
+            <Switch checked={form.enabled} onChange={(next) => onChange({ enabled: next })} label={t('keyEnabled')} disabled={busy} />
             <span className="relay_fieldLabel">{t('keyEnabled')}</span>
-          </label>
+          </span>
         )}
         {form.mode === 'create' && (
-          <label className="relay_checkRow">
-            <input
-              type="checkbox"
-              className="relay_checkbox"
-              checked={form.setAsActive}
-              disabled={busy}
-              onChange={(e) => onChange({ setAsActive: e.target.checked })}
-            />
+          <span className="relay_checkRow">
+            <Switch checked={form.setAsActive} onChange={(next) => onChange({ setAsActive: next })} label={t('keyCreateAndUse')} disabled={busy} />
             <span className="relay_fieldLabel">{t('keyCreateAndUse')}</span>
-          </label>
+          </span>
         )}
       </div>
-      <div className="relay_formActions">
-        <button type="button" className="relay_button relay_buttonSecondary" disabled={busy} onClick={onCancel}>
+      {error !== null && <div className="relay_msg relay_msgErr relay_cardMsg">{error}</div>}
+      <div className="relay_editorFooter">
+        <Button variant="outline" disabled={busy} onClick={onCancel}>
           {t('cancel')}
-        </button>
-        <button type="button" className="relay_button relay_buttonPrimary" disabled={busy} onClick={onSubmit}>
-          {busy ? (form.mode === 'create' ? t('keyCreating') : t('keySaving')) : form.mode === 'create' ? t('keyCreate') : t('save')}
-        </button>
+        </Button>
+        <Button variant="primary" disabled={busy} onClick={() => { void apply() }}>
+          {form.mode === 'create' ? (busy ? t('keyCreating') : t('keyCreate')) : (busy ? t('keySaving') : t('keyApply'))}
+        </Button>
       </div>
     </div>
   )

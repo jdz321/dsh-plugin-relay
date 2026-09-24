@@ -55,7 +55,21 @@ npm publish        # prepublishOnly 会先跑 typecheck + build
 - 图片实际由 GitHub 托管（raw.githubusercontent.com），第三方图床会被拒。
 - **截图一律用 mock 面板的虚构数据**（mock 面板 + 隔离 home），不得出现任何真实面板地址、账号、key 名称或余额。
 
-## 6. 发版节奏（后续版本）
+## 6. 宿主兼容（每次升级 dsh 开发依赖后必做）
+
+- [ ] `npm install @deepseek-ai/dsh@latest` 后**必须重跑一轮浏览器走查**：插件 UI 消费的 primitives（Button/Switch/Pill/Tag/StateDot/Menu/Modal）由宿主在运行时供给自己的编译版本，npm 侧测试覆盖不到视觉与行为。
+- [ ] **锁步升级类型包**：`@deepseek-ai/dsh-client-ui-primitives` 以 devDependency 精确锁版供类型（当前 `0.1.5-rc.2`），升级 dsh 开发依赖时同步改成宿主对应版本；npm 的 `latest` 标签停在 rc.1 属 prerelease 不挪 tag 的语义，锁版请用精确版本号。
+- [ ] 只消费「稳定子集」（见 AGENTS §4.6）：0.1.7 新增的 settings-form 套件、SegmentedControl、Checkbox 等**不引入**，等 npm 宿主线跟上后另立任务评估。
+- [ ] 走查通过的宿主版本记进 README「Compatibility」小节与本清单（当前实测：0.1.5-rc.2、0.1.5-rc.3；子集 diff 实证兼容至 0.1.7-rc.1）。
+- [ ] `engines.dsh` 下限只在「模块表缺少所需键」时才动（当前 `>=0.1.5-rc.2`，即首个携带 primitives 模块表的宿主）。
+- [ ] 若未来 primitives 出现破坏性漂移：先在 `MenuSelect` 等包装组件内做能力探测收敛爆点，不在业务代码里散落 try/catch。
+
+## 7. 预置知识库基线（维护节奏）
+
+- [ ] 主流模型发布潮后跑 `npm run preset:fetch`（读 `.dsh-home` 的面板地址与 models.dev，全程无凭据），diff 产物 `src/knowledge-preset.generated.ts` 并随代码一起提交。
+- [ ] 生成文件头部只允许计数信息——**不得**出现面板地址、账号等任何身份信息。
+
+## 8. 发版节奏（后续版本）
 
 1. 改代码 → `npm run typecheck && npm test && npm run build` 全绿。
 2. `CHANGELOG.md` 追加条目；package.json 升语义化版本。

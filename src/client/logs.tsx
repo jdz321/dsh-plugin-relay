@@ -7,10 +7,12 @@
  */
 
 import { useCallback, useEffect, useState } from 'react'
+import { Button, Tag } from '@deepseek-ai/dsh-client-ui-primitives'
 
 import { apiGet } from './api.js'
 import { datetimeLocalSeconds, datetimeLocalValue, endOfMonthSeconds, formatLogTime, secondsLabel, startOfMonthSeconds } from './format.js'
 import { tokenCountText, type Translator } from './locale.js'
+import { MenuSelect } from './menu-select.js'
 
 /** One shaped log row from GET /api/relay/logs. */
 export interface LogRow {
@@ -163,15 +165,16 @@ export function LogsTab({ t, keyNames }: LogsTabProps): JSX.Element {
       </div>
       <div className="relay_card">
         <div className="relay_filters">
-          <label className="relay_filterField relay_filterFieldWide">
+          <label className="relay_filterField relay_filterFieldGrow">
             <span className="relay_fieldLabel">{t('logsFilterStart')} ~ {t('logsFilterEnd')}</span>
-            <span className="relay_row">
+            <span className="relay_row relay_rowTime">
               <input
                 type="datetime-local"
                 className="relay_input"
                 value={filters.start}
                 onChange={(e) => setFilters((f) => ({ ...f, start: e.target.value }))}
               />
+              <span className="relay_filterTilde" aria-hidden="true">~</span>
               <input
                 type="datetime-local"
                 className="relay_input"
@@ -180,46 +183,42 @@ export function LogsTab({ t, keyNames }: LogsTabProps): JSX.Element {
               />
             </span>
           </label>
-          <label className="relay_filterField">
-            <span className="relay_fieldLabel">{t('logsFilterModel')}</span>
-            <select
-              className="relay_select"
-              value={filters.modelName}
-              onChange={(e) => setFilters((f) => ({ ...f, modelName: e.target.value }))}
-            >
-              <option value="">{t('keyGroupEmptyOption')}</option>
-              {modelNames.map((name) => <option key={name} value={name}>{name}</option>)}
-            </select>
-          </label>
-          <label className="relay_filterField">
-            <span className="relay_fieldLabel">{t('logsFilterKey')}</span>
-            <select
-              className="relay_select"
-              value={filters.tokenName}
-              onChange={(e) => setFilters((f) => ({ ...f, tokenName: e.target.value }))}
-            >
-              <option value="">{t('keyGroupEmptyOption')}</option>
-              {keyNames.map((name) => <option key={name} value={name}>{name}</option>)}
-            </select>
-          </label>
-          <label className="relay_filterField">
-            <span className="relay_fieldLabel">{t('logsFilterGroup')}</span>
-            <select
-              className="relay_select"
-              value={filters.group}
-              onChange={(e) => setFilters((f) => ({ ...f, group: e.target.value }))}
-            >
-              <option value="">{t('keyGroupEmptyOption')}</option>
-              {groupNames.map((name) => <option key={name} value={name}>{meta?.groups?.[name] ? `${name}（${meta.groups[name]}）` : name}</option>)}
-            </select>
-          </label>
-          <div className="relay_formActions">
-            <button type="button" className="relay_button relay_buttonPrimary relay_buttonSm" disabled={loading} onClick={apply}>
-              {t('logsQuery')}
-            </button>
-            <button type="button" className="relay_button relay_buttonSecondary relay_buttonSm" disabled={loading} onClick={reset}>
-              {t('logsReset')}
-            </button>
+          <div className="relay_filterRow">
+            <label className="relay_filterField">
+              <span className="relay_fieldLabel">{t('logsFilterModel')}</span>
+              <MenuSelect
+                value={filters.modelName}
+                placeholder={t('logsAllModels')}
+                items={modelNames.map((name) => ({ id: name, label: name }))}
+                onSelect={(id) => setFilters((f) => ({ ...f, modelName: id }))}
+              />
+            </label>
+            <label className="relay_filterField">
+              <span className="relay_fieldLabel">{t('logsFilterKey')}</span>
+              <MenuSelect
+                value={filters.tokenName}
+                placeholder={t('logsAllKeys')}
+                items={keyNames.map((name) => ({ id: name, label: name }))}
+                onSelect={(id) => setFilters((f) => ({ ...f, tokenName: id }))}
+              />
+            </label>
+            <label className="relay_filterField">
+              <span className="relay_fieldLabel">{t('logsFilterGroup')}</span>
+              <MenuSelect
+                value={filters.group}
+                placeholder={t('logsAllGroups')}
+                items={groupNames.map((name) => ({ id: name, label: meta?.groups?.[name] ? `${name}（${meta.groups[name]}）` : name }))}
+                onSelect={(id) => setFilters((f) => ({ ...f, group: id }))}
+              />
+            </label>
+            <div className="relay_formActions">
+              <Button variant="primary" size="sm" disabled={loading} onClick={apply}>
+                {t('logsQuery')}
+              </Button>
+              <Button variant="outline" size="sm" disabled={loading} onClick={reset}>
+                {t('logsReset')}
+              </Button>
+            </div>
           </div>
         </div>
       </div>
@@ -240,13 +239,13 @@ export function LogsTab({ t, keyNames }: LogsTabProps): JSX.Element {
           )}
       <div className="relay_pagination">
         <span className="relay_pageInfo">{t('logsTotal')(total)}</span>
-        <button type="button" className="relay_button relay_buttonSecondary relay_buttonSm" disabled={loading || page <= 1} onClick={() => gotoPage(page - 1)}>
+        <Button variant="outline" size="sm" disabled={loading || page <= 1} onClick={() => gotoPage(page - 1)}>
           {t('logsPrev')}
-        </button>
+        </Button>
         <span className="relay_pageInfo">{t('logsPageInfo')(page, pages)}</span>
-        <button type="button" className="relay_button relay_buttonSecondary relay_buttonSm" disabled={loading || page >= pages} onClick={() => gotoPage(page + 1)}>
+        <Button variant="outline" size="sm" disabled={loading || page >= pages} onClick={() => gotoPage(page + 1)}>
           {t('logsNext')}
-        </button>
+        </Button>
       </div>
     </div>
   )
@@ -255,14 +254,14 @@ export function LogsTab({ t, keyNames }: LogsTabProps): JSX.Element {
 /** Header row of the log table, rendered once above the rows. */
 export function LogTableHeader({ t }: { t: Translator }): JSX.Element {
   const columns: Array<[string, string]> = [
-    ['28%', t('colTime')],
+    ['24%', t('colTime')],
     ['12%', t('colKey')],
     ['8%', t('colGroup')],
-    ['16%', t('colLogModel')],
-    ['9%', t('colType')],
+    ['17%', t('colLogModel')],
+    ['8%', t('colType')],
     ['14%', t('colUsage')],
-    ['7%', t('colDuration')],
-    ['6%', t('colCost')],
+    ['8%', t('colDuration')],
+    ['9%', t('colCost')],
   ]
   return (
     <thead>
@@ -285,7 +284,7 @@ function LogRowView({ log, t }: { log: LogRow, t: Translator }): JSX.Element {
       <td>{log.group || '—'}</td>
       <td className="relay_logMono">{log.modelName || '—'}</td>
       <td>
-        <span className={log.isStream ? 'relay_tag relay_tagOk' : 'relay_tag'}>{log.isStream ? t('typeStream') : t('typeNonStream')}</span>
+        <Tag tone={log.isStream ? 'success' : 'outline'}>{log.isStream ? t('typeStream') : t('typeNonStream')}</Tag>
       </td>
       <td>
         <div>↑{tokenCountText(log.promptTokens)} ↓{tokenCountText(log.completionTokens)}</div>
@@ -295,7 +294,7 @@ function LogRowView({ log, t }: { log: LogRow, t: Translator }): JSX.Element {
         <div>{t('durationFirst')} {secondsLabel(log.frt)}</div>
         <div className="relay_logSub">{t('durationTotal')} {secondsLabel(log.useTime)}</div>
       </td>
-      <td>¥{costCny(log.quota)}</td>
+      <td className="relay_logCost">¥{costCny(log.quota)}</td>
     </tr>
   )
 }

@@ -146,3 +146,53 @@ describe('ModelsDevClient', () => {
     await expect(client.suggest('m')).resolves.toEqual({ input: ['text'], reasoning: false })
   })
 })
+
+describe('ModelsDevClient.refresh (刷新预置: bypass TTL, fail hard, single-flight)', () => {
+  it('forces a fetch even inside the TTL window', async () => {
+    let fetches = 0
+    const client = new ModelsDevClient({
+      ttlMs: 60_000,
+      fetchDoc: async () => {
+        fetches += 1
+        return { p: { models: { m: { modalities: { input: ['text'] }, reasoning: false, limit: { context: fetches * 1000 } } } } }
+      },
+    })
+    await client.suggest('m')
+    expect(fetches).toBe(1)
+    const doc = await client.refresh()
+    expect(fetches).toBe(2)
+    expect(doc.p!.models!.m!.limit!.context).toBe(2000)
+    // the fresh document now also serves the regular cache
+    await expect(client.suggest('m')).resolves.toMatchObject({ contextWindow: 2000 })
+  })
+
+  it('throws on failure so the caller can show a retryable error, and keeps the stale cache for suggest()', async () => {
+    let fetches = 0
+    const client = new ModelsDevClient({
+      ttlMs: 60_000,
+      fetchDoc: async () => {
+        fetches += 1
+        if (fetches === 1) return { p: { models: { m: { modalities: { input: ['text'] }, reasoning: false } } } }
+        throw new Error('offline')
+      },
+    })
+    await client.suggest('m')
+    await expect(client.refresh()).rejects.toThrow('offline')
+    await expect(client.suggest('m')).resolves.toEqual({ input: ['text'], reasoning: false })
+  })
+
+  it('shares one in-flight fetch across concurrent refresh calls', async () => {
+    let fetches = 0
+    const client = new ModelsDevClient({
+      ttlMs: 60_000,
+      fetchDoc: async () => {
+        fetches += 1
+        await new Promise((resolve) => { setTimeout(resolve, 5) })
+        return { p: { models: {} } }
+      },
+    })
+    await client.refresh()
+    await Promise.all([client.refresh(), client.refresh(), client.refresh()])
+    expect(fetches).toBe(2)
+  })
+})

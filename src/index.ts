@@ -12,17 +12,18 @@
 
 import Schema from '@deepseek-ai/schemastery'
 
-import { ModelsDevClient } from './capabilities.js'
+import { applyCapabilityOps } from './capability-ops.js'
+import { ModelsDevClient, type ModelsDevDocument } from './capabilities.js'
 import { CLIENT_MODULE_ID, KEY_REF_DEFAULT, NAMESPACE, PLUGIN_NAME, ROUTE_DEFAULT } from './constants.js'
 import { envProxy } from './http.js'
 import {
-  normalizeCapabilityEntry,
-  validateCapabilityEntry,
   deriveCapabilityFor,
   normalizeKnowledgeConfig,
   type CatalogEntry,
   type KnowledgeConfig,
 } from './knowledge.js'
+import { buildPresetEntries } from './knowledge-preset.js'
+import { KNOWLEDGE_PRESET } from './knowledge-preset.generated.js'
 import {
   formatQuota,
   keySummary,
@@ -35,7 +36,7 @@ import {
   type SwitchPlan,
 } from './plan.js'
 import { groupRatioOf, priceEntry } from './pricing.js'
-import { ensureRouteProfile, replayRouteCapabilities, storedRouteProfile, syncRouteCatalog } from './route-config.js'
+import { ensureRouteProfile, storedRouteProfile, syncRouteCatalog } from './route-config.js'
 import type { CredentialsService, HostContext, SchemaType, SettingsService } from './types.js'
 import { aggregateDailyBuckets, buildDashboardView, normalizeLog, startOfDaysAgo, startOfToday } from './usage.js'
 
@@ -125,6 +126,18 @@ function currentKnowledge(): KnowledgeConfig {
   return normalizeKnowledgeConfig(safeGet(NAMESPACE))
 }
 
+/**
+ * In-memory preset layer rebuilt by POST /api/relay/knowledge-refresh. Null
+ * means "use the compiled-in baseline" (src/knowledge-preset.generated.ts) —
+ * a restart deliberately falls back to it; persistence is preset:fetch's job.
+ */
+let runtimePreset: Record<string, CatalogEntry> | null = null
+
+/** User dicts + the effective preset layer, as every derivation consumes. */
+function resolvedKnowledge(): KnowledgeConfig {
+  return { ...currentKnowledge(), capabilityPreset: runtimePreset ?? KNOWLEDGE_PRESET }
+}
+
 /** JSON response helper (fetch routes answer with standard Response). */
 function json(data: unknown, status = 200): Response {
   return Response.json(data, { status })
@@ -151,10 +164,6 @@ async function readJson(request: Request): Promise<Record<string, unknown>> {
 
 function groupOf(self: Record<string, unknown> | null): string {
   return typeof self?.group === 'string' ? self.group : ''
-}
-
-function isObj(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value)
 }
 
 /** JSON-safe view of the integration state for the settings page. */
@@ -249,7 +258,7 @@ async function performSwitch(section: Section, idOrName: string, noModels: boole
   // the capability fields derived from the knowledge base / overrides.
   if (plan.ids) {
     try {
-      await syncRouteCatalog(settingsService, section, plan.ids, currentKnowledge())
+      await syncRouteCatalog(settingsService, section, plan.ids, resolvedKnowledge())
     } catch (err) {
       warnings.push(`模型列表写入被 llm-pi-ai 设置校验拒绝: ${err instanceof Error ? err.message : String(err)}`)
     }
@@ -278,19 +287,11 @@ function route(connection: { registerFetchRoute(owner: HostContext, spec: Record
   })
 }
 
-/** Validate one submitted capability dict entry after normalization. */
-function checkedEntry(raw: unknown, label: string): CatalogEntry {
-  const entry = normalizeCapabilityEntry(raw)
-  if (!entry) throw new Error(`${label}: 至少配置一项能力字段`)
-  validateCapabilityEntry(entry, label)
-  return entry
-}
-
 /** Build the per-model capability view the capability tab renders. */
 function capabilityModelsView(routeName: string) {
   const profile = storedRouteProfile(settingsService!, routeName)
   const entries = Array.isArray(profile?.models) ? profile!.models ?? [] : []
-  const knowledge = currentKnowledge()
+  const knowledge = resolvedKnowledge()
   return entries.map((entry) => {
     const derived = deriveCapabilityFor(String(entry.id), knowledge)
     return {
@@ -302,33 +303,6 @@ function capabilityModelsView(routeName: string) {
       catalogName: derived.catalogName ?? null,
     }
   })
-}
-
-/** Persist submitted knowledge dicts, then replay the rules onto the route. */
-async function saveKnowledgeAndReplay(routeName: string, body: Record<string, unknown>) {
-  const rawCatalog = isObj(body.catalog) ? body.catalog : {}
-  const rawOverrides = isObj(body.overrides) ? body.overrides : {}
-  const catalog: Record<string, CatalogEntry> = {}
-  for (const [name, raw] of Object.entries(rawCatalog)) {
-    const key = name.trim()
-    if (!key) throw new Error('知识库模型名不能为空')
-    catalog[key] = checkedEntry(raw, `知识库「${key}」`)
-  }
-  const overrides: Record<string, CatalogEntry> = {}
-  for (const [name, raw] of Object.entries(rawOverrides)) {
-    const key = name.trim()
-    if (!key) throw new Error('覆盖配置的模型 id 不能为空')
-    overrides[key] = checkedEntry(raw, `覆盖「${key}」`)
-  }
-  // update() deep-merges patches, so an emptied dict could never delete
-  // stored entries — replace both dicts wholesale with path ops instead.
-  // mutate() still queues serialized work per namespace: awaited before the
-  // response.
-  await settingsService!.mutate(NAMESPACE, [
-    { op: 'set', path: ['capabilityCatalog'], value: catalog },
-    { op: 'set', path: ['capabilityOverrides'], value: overrides },
-  ])
-  return await replayRouteCapabilities(settingsService!, routeName, currentKnowledge())
 }
 
 /**
@@ -418,7 +392,7 @@ export function apply(ctx: HostContext, config: Partial<PluginConfig> | undefine
       }))
       let catalogWarning: string | undefined
       try {
-        await syncRouteCatalog(settingsService, section, ids, currentKnowledge())
+        await syncRouteCatalog(settingsService, section, ids, resolvedKnowledge())
       } catch (err) {
         catalogWarning = err instanceof Error ? err.message : String(err)
       }
@@ -434,8 +408,9 @@ export function apply(ctx: HostContext, config: Partial<PluginConfig> | undefine
 
     // Capability Tab: the knowledge base plus per-id overrides live in the
     // relay namespace; the route entries carry only the derived result. GET
-    // returns both dicts and the derived per-model view; POST persists both
-    // dicts and replays the derivation over the route in one guarded write.
+    // returns both dicts, the preset layer, and the derived per-model view;
+    // POST applies directed ops (set/delete per name/id) and replays the
+    // derivation over the route in one guarded write.
     route(connection, ctx, 'capabilities', ['GET', 'POST'], async (request) => {
       if (!settingsService) return json({ ok: false, error: 'settings service unavailable' }, 500)
       const section = currentSection()
@@ -449,16 +424,44 @@ export function apply(ctx: HostContext, config: Partial<PluginConfig> | undefine
           routeDefaultInput: Array.isArray(profile?.defaultInput) ? profile!.defaultInput : ['text'],
           catalog: knowledge.capabilityCatalog,
           overrides: knowledge.capabilityOverrides,
+          presets: runtimePreset ?? KNOWLEDGE_PRESET,
           models: capabilityModelsView(section.route),
         })
       }
       const body = await readJson(request)
       try {
-        await saveKnowledgeAndReplay(section.route, body)
+        await applyCapabilityOps(settingsService, section.route, body as Record<string, unknown>, resolvedKnowledge)
         return json({ ok: true, models: capabilityModelsView(section.route) })
       } catch (err) {
         return json({ ok: false, error: err instanceof Error ? err.message : String(err) }, 400)
       }
+    })
+
+    // 刷新预置: force-fetch models.dev (bypassing the TTL cache), rebuild the
+    // preset layer with the same union logic as `npm run preset:fetch` — the
+    // panel source comes from the public /api/pricing when a connection is
+    // configured — and hold it in host memory until restart.
+    route(connection, ctx, 'knowledge-refresh', ['POST'], async () => {
+      let doc: ModelsDevDocument
+      try {
+        doc = await modelsDev.refresh()
+      } catch (err) {
+        return json({ ok: false, error: `models.dev 获取失败: ${err instanceof Error ? err.message : String(err)}` }, 502)
+      }
+      let panelModels: string[] | null = null
+      try {
+        const section = currentSection()
+        if (!missingSetup(section)) {
+          const pricing = await relayFromSection(section).pricing()
+          panelModels = pricing ? [...pricing.byModel.keys()] : null
+        }
+      } catch {
+        /* no panel connection right now — whitelist-only rebuild */
+      }
+      const built = buildPresetEntries(panelModels, doc)
+      runtimePreset = built.entries
+      hostLogger?.info(`relay: knowledge preset refreshed (${Object.keys(built.entries).length} entries)`)
+      return json({ ok: true, count: Object.keys(built.entries).length, dropped: built.dropped.length })
     })
 
     // ↻ models.dev reference values for one model name (knowledge base default).
