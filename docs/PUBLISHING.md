@@ -69,9 +69,20 @@ npm publish        # prepublishOnly 会先跑 typecheck + build
 - [ ] 主流模型发布潮后跑 `npm run preset:fetch`（读 `.dsh-home` 的面板地址与 models.dev，全程无凭据），diff 产物 `src/knowledge-preset.generated.ts` 并随代码一起提交。
 - [ ] 生成文件头部只允许计数信息——**不得**出现面板地址、账号等任何身份信息。
 
-## 8. 发版节奏（后续版本）
+## 8. 发版节奏（后续版本，自动化后）
 
-1. 改代码 → `npm run typecheck && npm test && npm run build` 全绿。
+1. 改代码 → `npm run typecheck && npm test && npm run build` 全绿（CI 会在 push/PR 时自动跑同一套）。
 2. `CHANGELOG.md` 追加条目；package.json 升语义化版本。
-3. `npm publish`；GitHub 打 tag（可选：附 Release）。
+3. `git tag vX.Y.Z && git push origin vX.Y.Z` → **publish workflow 自动跑 typecheck/build/test 并发布 npm**（tag 与 package.json 版本不一致会 fail-fast）；也可发 GitHub Release 之外手动在 Actions 页 Run workflow。
 4. 目录条目不用动——版本、下载量、star 由注册表 CI 自动刷新。
+
+## 9. 自动发布配置（一次性，GitHub Actions）
+
+工作流：`.github/workflows/publish.yml`（tag `v*` 或手动触发 → typecheck → build → test → `npm publish --provenance`）；`.github/workflows/ci.yml`（push main / PR 跑测试）。配置步骤：
+
+- [ ] npmjs.com 注册/登录账号（建议开启 2FA）。
+- [ ] Account → Access Tokens → **Generate New Token → Granular Access Token**：Permissions 选 **Read and write**；Packages 首次发布选 **All packages**（新包首次发布后可收窄到 `dsh-plugin-relay`）。
+- [ ] GitHub 仓库 → Settings → Secrets and variables → Actions → **New repository secret**：名称 `NPM_TOKEN`，值为上面的 token。
+- [ ] 首发版本：commit + `git tag v0.5.1 && git push origin v0.5.1` → Actions 的 Publish 跑绿即上架；npm 页面确认 README 渲染与 provenance 徽标。
+- [ ] 注意：历史 tag `v0.5.0` 与当前 package.json 版本不一致，若被 push 会触发 Publish 且被版本守卫 fail-fast——属预期防护，不必理会。
+- [ ] （可选加固）发布过一次后，可在 npm 包设置里配置 **Trusted Publisher**（GitHub 仓库 + workflow 文件名 `publish.yml`）改用 OIDC 免 token 发布；配置成功后移除 `NPM_TOKEN` secret 即可，workflow 的 `id-token: write` 已就位。
