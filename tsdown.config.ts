@@ -54,12 +54,10 @@ export default defineConfig([
     platform: 'browser',
     dts: false,
     clean: false,
-    // recharts + its d3/redux dependency tree are ~78% of the artifact;
-    // without minification the bundle ships at 2.2MB.
+    // The dashboard chart is hand-written SVG; the bundle is react +
+    // plugin code only. Minified it ships well under the 350KB cap the
+    // build-shape test enforces.
     minify: true,
-    // The browser module table has no `process`: bundled dependencies
-    // (recharts) carry NODE_ENV guards that must resolve at build time.
-    define: { 'process.env.NODE_ENV': JSON.stringify('production') },
     deps: {
       neverBundle: [...CLIENT_EXTERNALS],
       onlyBundle: false,

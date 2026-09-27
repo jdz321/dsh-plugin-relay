@@ -1,12 +1,12 @@
 # The dsh-plugin-relay bundle patch.
 #
 # The only row here mounts the host plugin. Everything panel-specific — the
-# pi-ai route profile (baseURL, key reference, model catalog) and the default
-# model — is written at runtime into the user's settings document
-# (`llm-pi-ai:` / `agent-default-model:` sections, both hot-reloaded) when the
-# connection is saved or a key is picked in the settings page. dsh-base
-# already mounts llm-pi-ai dormant with zero routes; the route materializes on
-# first key use and follows the connection settings from then on.
+# per-panel pi-ai route profiles (baseURL, key reference, model catalog) and
+# the default model — is written at runtime into the user's settings document
+# (`llm-pi-ai:` / `relay:` sections, both hot-reloaded) when a panel is added,
+# a key is picked, or a capability is saved. dsh-base already mounts llm-pi-ai
+# dormant with zero routes; each panel's route materializes on its first key
+# use and follows the panel's connection settings from then on.
 #
 # Values below are the composition `base` of the plugin's settings namespace;
 # the settings page and settings.yaml override them per field without a
@@ -15,7 +15,3 @@
 - insert:
     - id: relay
       name: dsh-plugin-relay
-      config:
-        relayKind: new-api
-        route: relay
-        keyRef: RELAY_API_KEY

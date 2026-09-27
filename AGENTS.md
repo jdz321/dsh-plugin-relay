@@ -19,13 +19,13 @@
 
 ## 1. 项目定位
 
-把 dsh 接入 **new-api 系中转站面板**（one-api / new-api / Veloera / done-hub 等同族；无任何面板专属默认值）。插件 = npm 包 `dsh-plugin-relay`：
+把 dsh 接入 **new-api 系中转站面板**（one-api / new-api / Veloera / done-hub 等同族；无任何面板专属默认值）。插件 = npm 包 `dsh-plugin-relay`。**v0.6.0 起支持多套面板同时生效**：每套面板是 pi-ai 里的一个独立自定义提供方（模型选择器中并列可选），不是一个切换器。
 
-- **连接**：baseUrl、访问令牌（write-only）、用户 ID（手动填写）存于 `relay` 设置 namespace，保存即热生效；连接字段由插件动态镜像到 `llm-pi-ai.providers.<route>`（baseURL 等），**不依赖 patch 硬编码**；
-- **API Keys**：列出/新建/编辑/删除账户 key（名称/分组/分组倍率/额度/有效期/启停，**不含 key 内容**），一键「使用」切换生效 key（禁用 key 附加警告），切换时同步模型目录；创建 key 的明文在宿主侧剥离（「创建并设为生效」走服务端凭据写入，不做复制 key 功能）；
-- **模型**：当前生效 key 可调用的模型（id + 价格 + 分组），三种计价口径；刷新时同步进 dsh 路由目录，**按 id 预合并保留既有字段**；
-- **数据看板/使用日志**：余额 + 近 7 天按模型消耗堆叠图（recharts 打进 client 产物，react 系外置）；面板日志分页/筛选/整形（`other` JSON 解析 `frt`，容错）；
-- **模型能力**：能力配置真源在插件 namespace——**知识库**（按规范模型名：input/reasoning/contextWindow）+ **按面板 id 覆盖** + **预置层**（`src/knowledge-preset.generated.ts` 编译期基线，`npm run preset:fetch` 生成：models.dev 主流白名单 ∪ 面板公开 `/api/pricing` 规范化并集，仅收录近 `PRESET_MAX_AGE_DAYS=183` 天内发布的模型（models.dev `release_date`，无日期不合资格），无凭据参与；同名用户条目覆盖预置，「刷新预置」在宿主内存重建、重启回落基线）；同步/保存时按「覆盖 → 知识库（自定义 → 预置；精确 → 剥一至两层变体后缀=近似）→ 不触碰」重放到 `llm-pi-ai.providers.relay.models[n].{input,reasoningEfforts,contextWindow}`，只写插件持有配置的字段（官方「模型」页对未配置 id 的手工修改不被冲掉）；能力保存 = 定向 ops（catalogSet/Delete + overrideSet/Delete 逐条路径操作，删除真实生效）+ 一次修订守卫重放；**UI 控件复用宿主 primitives**（见 §4.6）；**插件不管理默认模型**（agent-default-model 是用户自己的事）；
+- **面板（连接）**：`relay.panels` 字典，每条 `PanelConfig = { id, baseUrl, relayKind, accessToken(secret), userId, keyRef, selectedKeyName }`。**面板 id 即 pi-ai 路由键与提供方显示名**（创建后不可改名），规范 `[a-zA-Z0-9][a-zA-Z0-9_-]{0,31}` 且唯一；keyRef 按 `RELAY_API_KEY_<ID 大写规范化>` 生成并去重。主面板只有「连接」（面板列表 + 行内编辑卡 + 删除 Modal + 测试连接）与「模型能力」两个 tab；keys/模型/看板/日志迁入**二级页面**（顶部返回 + 状态行 + 测试按钮）。连接测试（`POST /api/relay/connection-test`）按四类返回：unreachable / user-mismatch（401 含 New-Api-User 或「不匹配」）/ token-invalid（其它 401）/ error:<detail>。嵌套在 dict 内的 `role('secret')` 由宿主 redact walker 全线脱敏（子代理读源码 + 走查双验证；secret 字段**不得设 default/required**）。
+- **API Keys**（按面板，`?panel=`/body.panel 寻址）：列出/新建/编辑/删除账户 key（名称/分组/分组倍率/额度/有效期/启停，**不含 key 内容**），一键「使用」切换该面板生效 key（禁用 key 附加警告），切换时同步该面板路由的模型目录；创建 key 的明文在宿主侧剥离（「创建并设为生效」走服务端凭据写入，不做复制 key 功能）；
+- **模型**（按面板）：当前生效 key 可调用的模型（id + 价格 + 分组），三种计价口径；刷新时同步进该面板路由目录，**按 id 预合并保留既有字段**；
+- **数据看板/使用日志**（按面板）：余额 + 近 7/14/30 天按模型消耗堆叠图（**手写 SVG**，见 client/dashboard-chart.tsx；recharts 已移除，client 产物 95KB，build-shape 断言 ≤350KB）；面板日志分页/筛选/整形（`other` JSON 解析 `frt`，容错）；
+- **模型能力**：能力配置真源在插件 namespace——**知识库**（按规范模型名：input/reasoning/contextWindow/maxTokens，全局）+ **按面板按 id 覆盖**（`capabilityOverrides.<panelId>.<modelId>`）+ **预置层**（`src/knowledge-preset.generated.ts` 编译期基线，`npm run preset:fetch` 生成：**models.dev 主流基线**——第一方作者厂商白名单（16 键）→ 365 天发布窗口（`PRESET_MAX_AGE_DAYS=365`）→ 剔除非对话（模态与名字形态双信号）→ 渠道重复登记去重（剥 `@渠道`/`vendor/`/`-maas`，同名丢弃、孤儿 rekey；发布日期只取第一方条目，渠道日期是脏数据）；可选 OpenRouter 用量兜底仅限脚本侧（`OPENROUTER_API_KEY`），运行时刷新不引入新凭据；同名用户条目覆盖预置，「刷新预置」在宿主内存重建并**逐面板重放路由**（`{ok,count,replayed}`），重启回落基线）；匹配层级 **L0-L5**（精确 → 大小写折叠（歧义放弃）→ 剥 1-2 层变体后缀 → 版本分隔符互换（`5.1`↔`5-1` 双向）→ 唯一变体补全（preview/latest/exp）→ 人工别名 `{k3→kimi-k3}`），L1-L5 一律近似；同步/保存/刷新时按「覆盖 → 知识库 → 不触碰」重放到 `llm-pi-ai.providers.<panelId>.models[n].{input,reasoningEfforts,contextWindow,maxTokens}`，只写插件持有配置的字段（清除配置即回落启发式；官方「模型」页手工修改不被冲掉）；能力保存 = 定向 ops（覆盖 ops 携带 `panel` 字段）+ 修订守卫重放；**UI 控件复用宿主 primitives**（见 §4.6）；**插件不管理默认模型**（agent-default-model 是用户自己的事）；
 - **热生效**：一切写入走 dsh settings/credentials 服务，运行中会话下一次请求立即生效。
 
 ## 2. 仓库结构
@@ -38,20 +38,24 @@
 ├─ tsconfig.json       # TS strict；jsx react-jsx
 ├─ vitest.config.ts
 ├─ src/                # TS 源码（构建产物进 lib/，lib/ 已 gitignore）
-│  ├─ index.ts         # 宿主插件入口：relay 设置 namespace + /api/relay/* 路由
-│  ├─ constants.ts     # 命名总表（namespace/路由/keyRef/档位/模态）
-│  ├─ plan.ts          # section 默认值、选 key、切换计划
+│  ├─ index.ts         # 宿主插件入口：relay 设置 namespace（panels 字典）+ /api/relay/* 路由
+│  ├─ constants.ts     # 命名总表（namespace/面板 id 规范/keyRef 前缀/档位/模态/上限）
+│  ├─ panels.ts        # 面板配置模型（PanelConfig/id 校验/keyRef 生成/路由字段）
+│  ├─ panels-ops.ts    # 面板 CRUD（create/update/delete 清理路由+覆盖组+凭据；可测核心）
+│  ├─ plan.ts          # 选 key、切换计划、key 元数据整形
 │  ├─ relay.ts         # new-api 管理 API 客户端
 │  ├─ pricing.ts       # /api/pricing 归一化（三计价口径 + 分组倍率 + vendors）
 │  ├─ catalog.ts       # 目录整形与合并（name=id；同步保留既有字段）
-│  ├─ route-config.ts  # llm-pi-ai 路由 profile 读写（修订守卫重试、能力字段级合并）
-│  ├─ capabilities.ts  # models.dev 客户端（映射/合并/缓存/单飞/refresh）
-│  ├─ knowledge.ts     # 知识库/覆盖/预置三层派生规则（matchCatalogName 等）
-│  ├─ knowledge-preset.ts             # 预置构建纯逻辑（脚本与运行时共用；白名单在此）
-│  ├─ knowledge-preset.generated.ts   # preset:fetch 产物（入库；头部只有计数）
-│  ├─ capability-ops.ts # POST /capabilities 定向 ops 处理（可测核心）
+│  ├─ route-config.ts  # llm-pi-ai 路由 profile 读写（修订守卫重试、能力字段级合并、unsetRoute）
+│  ├─ capabilities.ts  # models.dev 客户端（映射/合并/缓存/单飞/refresh；limit.context+limit.output）
+│  ├─ knowledge.ts     # 知识库/覆盖/预置派生规则（matchCatalogName L0-L5、KnowledgeConfig/KnowledgeView）
+│  ├─ knowledge-preset.ts             # 预置构建纯逻辑（主流口径；脚本与运行时共用；白名单/窗口/去重在此）
+│  ├─ knowledge-preset.generated.ts   # preset:fetch 产物（入库；头部只有 models.dev 计数）
+│  ├─ capability-ops.ts # POST /capabilities 定向 ops 处理（覆盖带 panel 寻址；可测核心）
+│  ├─ connection-test.ts # 连接测试（classifyConnectionError 四类；可测核心）
+│  ├─ refresh.ts       # 刷新预置 + 逐面板路由重放（可测核心）
 │  ├─ http.ts          # HTTP(S) 客户端（超时、可选代理 CONNECT）
-│  └─ client/          # 浏览器设置页（六选项卡；section / capabilities / menu-select / dashboard / logs / locale / styles …）
+│  └─ client/          # 浏览器设置页（主页两 tab：panels-tab 连接列表 + capabilities；二级页 panel-detail 四 tab：keys / models-tab / dashboard(SVG 图) / logs；locale / styles …）
 ├─ scripts/dev.js      # npm start 开发启动器（强制 DSH_HOME=<仓库>/.dsh-home，默认端口 3098）
 ├─ scripts/dev.d.ts    # dev.js 的类型声明（供 dev-home 测试导入）
 ├─ scripts/fetch-knowledge-preset.mjs  # npm run preset:fetch（纯 codegen：node 类型剥离直跑 src，重写生成的源文件，不触发 build）
@@ -69,7 +73,7 @@ npm run build      # tsdown → lib/index.js（宿主 ESM）+ lib/client.js（�
 npm test           # vitest run（mock 面板 + fake-settings，一律不读写真实 .dsh-home）
                    # 注意：先 npm run build 再 npm test——build-shape 测试读取 lib/ 产物
 npm start          # 开发启动：dsh web --port 3098，DSH_HOME 强制 = <仓库>/.dsh-home；--dsh-home <dir> / --port <n> 可覆盖
-npm run preset:fetch   # 拉「面板公开 pricing ∪ models.dev」重新生成 src/knowledge-preset.generated.ts（纯 codegen，不 build——产物同步走手动 build / prepublishOnly / CI；脚本经 scripts/ts-resolver.mjs 直跑 src，需 Node ≥22.18）
+npm run preset:fetch   # 拉 models.dev 重新生成 src/knowledge-preset.generated.ts（主流基线：白名单/365 天/非对话剔除/渠道去重；OPENROUTER_API_KEY 可选兜底；面板不再是数据源。纯 codegen 不 build——产物同步走手动 build / prepublishOnly / CI；脚本经 scripts/ts-resolver.mjs 直跑 src，需 Node ≥22.18）
 ```
 
 改动 src/ 后必须 `npm run build`，再重装/重链 profile；正在运行的 dsh 实例要重启才会加载新宿主产物（client 产物刷新页面即可）。
@@ -130,18 +134,17 @@ DSH_HOME="$PWD/.dsh-home" node_modules/.bin/dsh plugin --profile web add "$PWD"
 - **使用日志**：`GET /api/log/self?p=&page_size=&type=0&start_timestamp=&end_timestamp=&token_name=&model_name=&group=` → `{data:{page,page_size,total,items}}`；条目含 `cache_read_tokens/cache_creation_tokens/reasoning_tokens/reasoning_effort` 独立列；首字耗时在 `other` JSON 串的 `frt`（毫秒），解析必须容错；名称筛选为子串匹配、分组为精确。
 - **用量统计**：`GET /api/log/self/stat[start_timestamp&end_timestamp]` → `{quota,rpm,tpm}`；不带参数是**全量口径**（今日口径须显式传今日零点窗口）。
 - **数据看板**：`GET /api/data/self?start_timestamp=&end_timestamp=&default_time=hour` → 裸数组小时桶 `{model_name,created_at,token_used,count,quota}`；面板只保留近期桶（稀疏/空是常态）；插件统一请求 hour 桶、客户端按本地日聚合，不依赖 fork 的 day 语义。`/api/user/self` 有 `quota/used_quota/request_count`。
-- **模型 id ↔ models.dev 匹配**：规则为「精确 id → 剥一至两层尾部 `-变体` 段再精确（标注 approximate）→ 放弃」；不做模糊/大小写归一化（实测零增益有误配风险）；未命中多为渠道命名面板特有模型（`grok-video`、`gpt-image-2.5-*` 族）。
+- **模型 id ↔ models.dev 匹配（v0.6.0 L0-L5）**：L0 精确 → L1 大小写折叠精确（折叠后多候选即放弃）→ L2 剥一至两层尾部 `-变体` 段（原样与折叠各试一轮，标注 approximate）→ L3 版本分隔符互换（`(\d).(\d)`↔`(\d)-(\d)` 双向后走 L0/L1）→ L4 唯一变体补全（面板 id（含剥层后）+ 恰一个 preview/latest/exp 恰为某规范名且候选唯一）→ L5 人工别名表 `{k3→kimi-k3}`（knowledge.ts `PRESET_ALIASES`）→ 放弃；L1-L5 一律近似。每层全等 + 唯一性约束，无模糊/包含匹配；实证命中率 67/83（miss = 图像视频类 + gemini-2.5 出窗）。
 - 额度换算：¥ ≈ quota 点数 ÷ 500000（面板口径）。
 
 ## 6. 测试与验收
 
-- `npm test`（vitest）：pricing/relay（mock 面板三种方言+vendors）、catalog（name=id、合并保留）、route-config（能力合并/删除/修订守卫重试/同步保留）、capabilities（models.dev 三态映射、缓存单飞、refresh 绕缓存/失败抛错/单飞）、knowledge（含预置层派生：同名覆盖/并集匹配/近似）、knowledge-preset（fixture：白名单/面板规范化/丢弃/并集/release_date 窗口）、capability-ops（定向 ops 路径形状、删除真实生效、重放一次写、坏条目整批拒绝）、capability-draft（entryFromDraft/parseContextWindow 矩阵，K=1024）、build-shape（**vm 沙箱真实加载 client 产物**：捕获 `__ModuleLoader__.load` 定义、调 factory 断言 apply/inject 导出面与 require 白名单——minify 会改写字符串形态，勿用 grep 断言；宿主 ESM externals；**交付物历史专名哨兵零命中审计（哨兵明文见 tests/build-shape.test.ts）**）、dev-home。
+- `npm test`（vitest）：pricing/relay（mock 面板三种方言+vendors）、catalog（name=id、合并保留）、route-config（能力合并/删除/修订守卫重试/同步保留/maxTokens 回落/unsetRoute/分组覆盖视图）、capabilities（models.dev 三态映射、limit.output、缓存单飞、refresh 绕缓存/失败抛错/单飞）、knowledge（**L0-L5 层级矩阵**：casefold/版本分隔/变体补全唯一性/别名/歧义放弃/strip 回归；maxTokens 校验；分组 overrides 归一）、knowledge-preset（fixture：主流白名单/365 天窗口/非对话双信号/渠道去重 drop+rekey/首方日期权威/OpenRouter 注入与降级/slug 映射）、capability-ops（定向 ops 路径形状、覆盖带 panel 寻址、删除真实生效、空组清理、重放一次写、坏条目整批拒绝）、panels-ops（CRUD/id 校验与唯一/keyRef 生成去重/删除清理落盘/凭据 unset 告警）、refresh（刷新+逐面板重放/单面板失败不回滚内存层/取数失败抛错）、connection-test（四类分类矩阵 + mock 面板 401 两形态 + 死端口）、dashboard-chart（刻度/抽稀/堆叠几何纯函数）、capability-draft（entryFromDraft/parseContextWindow 矩阵，K=1024，maxTokens 上限 1,048,576）、build-shape（**vm 沙箱真实加载 client 产物**：捕获 `__ModuleLoader__.load` 定义、调 factory 断言 apply/inject 导出面与 require 白名单——minify 会改写字符串形态，勿用 grep 断言；宿主 ESM externals；**client 体积 ≤350KB 断言**；嵌套 secret schema 断言；**交付物历史专名哨兵零命中审计（哨兵明文见 tests/build-shape.test.ts）**）、dev-home。
 - **隔离 home 的正确做法**：`mkdir` 新目录后 `DSH_HOME=<新目录> node_modules/.bin/dsh plugin --profile web add "$PWD"` 从零安装。**不要 `cp -R` 复制现成 home**（profile bundle 解析会断）。
-- 浏览器验收：隔离实例（`node scripts/dev.js --dsh-home <临时目录> --port 3198 --no-open`）+ mock 面板（`node .tmp/run-mock.mjs <port>`，`tests/mock-relay.ts` 支持固定端口）+ browser-use / web-gui-tester 技能（若 IAB 输入管线失效，可用本机 Chrome headless + 零依赖 CDP 直驱 `Input.dispatchMouseEvent` 兜底）。走查清单：六 Tab 渲染；连接保存落盘；keys 行↔卡（一次一张卡、应用即写、失败不收卡、Modal 删除、启用 Switch）；Use 后 active 标签即时出现（竞态回归）；模型表三计价；看板四卡一行（getBoundingClientRect 断言同行）；日志两行筛选不叠压 + 三个下拉占位文案 + MenuSelect 开/选/关；能力页：预置折叠区可搜、平台卡收起/展开、1M/256K 换算与非法拒绝、完成即存 → **settings.yaml 落盘断言**（含目录删除真实生效）、刷新预置、无全局保存按钮；禁用 key 警告；**中英两种界面语言各走查一遍**。**注意：dsh 设置对话框会拦截 playwright locator 的指针点击（actionability 超时），DOM 快照可用；点按钮用 cua 坐标或 dom_cua node 路径，且点击可能被吞，要点后验证状态再重试。** 更多实测坑：**scrollIntoView 平滑滚动会让测量
+- 浏览器验收：隔离实例（`node scripts/dev.js --dsh-home <临时目录> --port 3198 --no-open`）+ mock 面板（`node .tmp/run-mock.mjs <port>`，`tests/mock-relay.ts` 支持固定端口；多面板起两个 mock 实例）+ browser-use / web-gui-tester 技能（若 IAB 输入管线失效，可用本机 Chrome headless + 零依赖 CDP 直驱兜底——本版 IAB 输入管线实测失效，CDP `Runtime.evaluate` 直驱 DOM `.click()`/React 原生 setter 是最稳路径，dsh 对话框对 Playwright locator 与 IAB 派发事件都拦截）。走查清单：主页两 tab（连接/模型能力）渲染；面板列表 CRUD（行内编辑卡 / Modal 删除 / 二级页进入返回）+ 双面板同时生效（两条路由落盘）+ 删除清理（路由/覆盖组/凭据引用）落盘断言；二级页四 tab 回归；keys 行↔卡（一次一张卡、应用即写、失败不收卡、Modal 删除、启用 Switch）；Use 后 active 标签即时出现（竞态回归）；禁用 key 警告；模型表三计价；看板四卡一行（getBoundingClientRect 断言同行）+ 7/14/30 切换 + SVG 图视觉走查（对齐/图例/悬停/显隐）；日志两行筛选不叠压 + 三个下拉占位文案 + MenuSelect 开/选/关；能力页：预置折叠区可搜（~140 条）、平台卡按面板分组 + 覆盖率指示、匹配徽标（mock 含小写 id / `x.1` 式 id / 缺 preview id / k3 别名）、maxTokens 编辑与落盘断言（settings.yaml 精确断言，含清除回落）、完成即存、刷新预置（含重放消息）、无全局保存按钮；连接测试四态（正常/坏 token/坏 userId/死端口）；**中英两种界面语言各走查一遍**。**注意：dsh 设置对话框会拦截 playwright locator 的指针点击（actionability 超时），DOM 快照可用；点按钮用 cua 坐标或 dom_cua node 路径，且点击可能被吞，要点后验证状态再重试。** 更多实测坑：**scrollIntoView 平滑滚动会让测量
   坐标过期**——用 `behavior:'instant'` 滚动、沉降后复测并对 `elementFromPoint` 校验命中再点；
   **`<details>` 折叠内容与对话框裁剪会让元素不可命中**（有布局但 elementFromPoint 不中），
   需逐候选评分后再点；管道命令记得 `set -o pipefail`（否则脚本失败被 tee 吞掉）。
-- **多面板**：起两个 mock 实例（`node .tmp/run-mock.mjs <port>` 各一份）覆盖「多站同时生效」。
 - **真实面板写路径的临时 key 约定**：仅允许一次性临时 key（名称前缀 `dsh-temp-`）走
   创建→编辑→删除闭环，用后即删、面板无残留；既有 key 一律不碰。
 - **涉及真实账号时**：只读调用可随意；`/use` 等改写操作只在隔离 home 测；真实 home 只做只读确认；任何真实账号信息不入报告、不入 git。
@@ -162,4 +165,5 @@ DSH_HOME="$PWD/.dsh-home" node_modules/.bin/dsh plugin --profile web add "$PWD"
 - **v0.3.0**：纯插件化 npm 包结构（删 CLI）；keys/models UI 重做；`/use` 服务端写竞态修复；自动探测用户 ID 移除。
 - **v0.4.0**：全面去 vendor 专名化（包名 dsh-plugin-relay / namespace relay / 路由 /api/relay/* / keyRef RELAY_API_KEY）；**删 prettyModelName**（模型只认 id，目录 name=id）；**设置页四选项卡 + 「模型能力」选项卡**（能力写 models 条目的 input/reasoningEfforts，字段级合并 + 修订守卫；models.dev 参考值；手工增删）；**TypeScript 重构**（src/ → tsdown → lib/；宿主 ESM + client CJS 包裹产物；vitest；tsc strict）。
 - **v0.5.0**：模型能力知识库 + 匹配规则（真源移入插件 namespace，路由条目能力字段变派生状态；contextWindow 默认值）；**移除默认模型管理**（不写 agent-default-model，文案同步）；账户行精简（用户名 + 余额）；**API key 增删改**（明文剥离 + status_only 启停）；数据看板（recharts 堆叠图，react 系外置、process.env.NODE_ENV 构建期消解）与使用日志页签；dev 启动器 `--no-open`。
-- **v0.5.1（当前）**：体验修订——key **行内原地编辑**（行↔卡，对齐官方 Models 页；删除走 Modal）；**全面复用宿主 primitives**（Button/Switch/Pill/Tag/StateDot/Menu/Modal + MenuSelect 统一下拉，§4.6 纪律；类型用官方 npm 包精确锁版）；看板四卡一行；日志筛选两行布局 + 下拉占位文案修复；**能力页重构**（预置知识库编译期入库 + `preset:fetch`（仅近 183 天发布的模型）+ 「刷新预置」内存层；上下文 `1M`/`256K` 简写；三区全部原地展开、页级单卡；模型 id 完整单行展示、匹配提示置于 id 下方、摘要两行钳制；编辑卡页脚按钮成组靠右对齐官方；`/capabilities` 改定向 ops——删除真实生效；全局保存按钮移除）；client 产物 minify（2.23MB→0.98MB，recharts 树占 ~78%）。
+- **v0.6.0（当前）**：**多套中转站**（`relay.panels` 字典，面板 id=路由键=提供方名，连接列表 + 二级页四 tab；删除清理路由/覆盖组/凭据；嵌套 secret 全线脱敏实证）；**预置基线改主流口径**（models.dev 第一方白名单 16 键 → 365 天窗口 → 非对话剔除 → 渠道去重/rekey；面板不再是数据源；发布日期只取第一方条目；OpenRouter 可选兜底；基线 140 条）；**匹配升级 L0-L5**（casefold/版本分隔互换/唯一变体补全/`k3` 别名；实证 67/83）；**刷新预置自动重放**全部已配置路由（v0.5.1 缺口修复）；**maxTokens 进能力体系**（limit.output 提取/校验 ≤1,048,576/重放/清除回落）；**连接测试**四态分类；**手写 SVG 堆叠图替换 recharts**（983KB→95KB，350KB 断言进 build-shape）；看板 7/14/30 + 图例显隐；覆盖率指示；摘要 1M 化（1024 基 tokenCountText）。
+- **v0.5.1**：体验修订——key **行内原地编辑**（行↔卡，对齐官方 Models 页；删除走 Modal）；**全面复用宿主 primitives**（Button/Switch/Pill/Tag/StateDot/Menu/Modal + MenuSelect 统一下拉，§4.6 纪律；类型用官方 npm 包精确锁版）；看板四卡一行；日志筛选两行布局 + 下拉占位文案修复；**能力页重构**（预置知识库编译期入库 + `preset:fetch`（仅近 183 天发布的模型）+ 「刷新预置」内存层；上下文 `1M`/`256K` 简写；三区全部原地展开、页级单卡；模型 id 完整单行展示、匹配提示置于 id 下方、摘要两行钳制；编辑卡页脚按钮成组靠右对齐官方；`/capabilities` 改定向 ops——删除真实生效；全局保存按钮移除）；client 产物 minify（2.23MB→0.98MB，recharts 树占 ~78%）。

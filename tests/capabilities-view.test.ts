@@ -59,48 +59,68 @@ describe('contextWindowHint (live conversion display)', () => {
 describe('draftFromEntry / draftFromView (tri-state seeding)', () => {
   it('seeds from a stored entry', () => {
     const draft = draftFromEntry({ input: ['text'], reasoning: ['high'], contextWindow: 1048576 })
-    expect(draft).toEqual({ input: ['text'], reasoning: 'on', levels: ['high'], contextWindow: '1048576' })
+    expect(draft).toEqual({ input: ['text'], reasoning: 'on', levels: ['high'], contextWindow: '1048576', maxTokens: '' })
     expect(draftFromEntry({ reasoning: false }).reasoning).toBe('off')
     expect(draftFromEntry({}).reasoning).toBeNull()
   })
 
+  it('seeds maxTokens as raw text', () => {
+    expect(draftFromEntry({ maxTokens: 65536 }).maxTokens).toBe('65536')
+    expect(draftFromEntry({}).maxTokens).toBe('')
+    expect(draftFromView({ maxTokens: null }).maxTokens).toBe('')
+    expect(draftFromView({ maxTokens: 32768 }).maxTokens).toBe('32768')
+  })
+
   it('seeds from a nullable server view (null → undeclared)', () => {
     const draft = draftFromView({ input: ['text', 'image'], reasoning: null, contextWindow: null })
-    expect(draft).toEqual({ input: ['text', 'image'], reasoning: null, levels: [], contextWindow: '' })
+    expect(draft).toEqual({ input: ['text', 'image'], reasoning: null, levels: [], contextWindow: '', maxTokens: '' })
     expect(draftFromView({ reasoning: false }).reasoning).toBe('off')
   })
 })
 
 describe('entryFromDraft (client-side validation before POST)', () => {
   it('omits empty fields and returns undefined for a blank draft', () => {
-    expect(entryFromDraft({ input: [], reasoning: null, levels: [], contextWindow: '' })).toBeUndefined()
-    expect(entryFromDraft({ input: ['text'], reasoning: null, levels: [], contextWindow: '' })).toEqual({ input: ['text'] })
+    expect(entryFromDraft({ input: [], reasoning: null, levels: [], contextWindow: '', maxTokens: '' })).toBeUndefined()
+    expect(entryFromDraft({ input: ['text'], reasoning: null, levels: [], contextWindow: '', maxTokens: '' })).toEqual({ input: ['text'] })
   })
 
   it('maps the tri-state reasoning', () => {
-    expect(entryFromDraft({ input: [], reasoning: 'off', levels: [], contextWindow: '' })!.reasoning).toBe(false)
-    expect(entryFromDraft({ input: [], reasoning: 'on', levels: ['low'], contextWindow: '' })!.reasoning).toEqual(['low'])
+    expect(entryFromDraft({ input: [], reasoning: 'off', levels: [], contextWindow: '', maxTokens: '' })!.reasoning).toBe(false)
+    expect(entryFromDraft({ input: [], reasoning: 'on', levels: ['low'], contextWindow: '', maxTokens: '' })!.reasoning).toEqual(['low'])
   })
 
   it('rejects empty level sets and non-integer context windows', () => {
-    expect(() => entryFromDraft({ input: [], reasoning: 'on', levels: [], contextWindow: '' })).toThrow('levels-required')
-    expect(() => entryFromDraft({ input: [], reasoning: null, levels: [], contextWindow: '12.5' })).toThrow('context-invalid')
-    expect(() => entryFromDraft({ input: [], reasoning: null, levels: [], contextWindow: '0' })).toThrow('context-invalid')
-    expect(entryFromDraft({ input: [], reasoning: null, levels: [], contextWindow: '4096 ' })!.contextWindow).toBe(4096)
+    expect(() => entryFromDraft({ input: [], reasoning: 'on', levels: [], contextWindow: '', maxTokens: '' })).toThrow('levels-required')
+    expect(() => entryFromDraft({ input: [], reasoning: null, levels: [], contextWindow: '12.5', maxTokens: '' })).toThrow('context-invalid')
+    expect(() => entryFromDraft({ input: [], reasoning: null, levels: [], contextWindow: '0', maxTokens: '' })).toThrow('context-invalid')
+    expect(entryFromDraft({ input: [], reasoning: null, levels: [], contextWindow: '4096 ', maxTokens: '' })!.contextWindow).toBe(4096)
   })
 
   it('converts suffix shorthand into numeric token counts', () => {
-    expect(entryFromDraft({ input: [], reasoning: null, levels: [], contextWindow: '1M' })!.contextWindow).toBe(1_048_576)
-    expect(entryFromDraft({ input: [], reasoning: null, levels: [], contextWindow: '256k' })!.contextWindow).toBe(262_144)
-    expect(() => entryFromDraft({ input: [], reasoning: null, levels: [], contextWindow: '10M' })).toThrow('context-invalid')
+    expect(entryFromDraft({ input: [], reasoning: null, levels: [], contextWindow: '1M', maxTokens: '' })!.contextWindow).toBe(1_048_576)
+    expect(entryFromDraft({ input: [], reasoning: null, levels: [], contextWindow: '256k', maxTokens: '' })!.contextWindow).toBe(262_144)
+    expect(() => entryFromDraft({ input: [], reasoning: null, levels: [], contextWindow: '10M', maxTokens: '' })).toThrow('context-invalid')
+  })
+
+  it('maxTokens parses with the 1,048,576 cap and reports its own error', () => {
+    expect(entryFromDraft({ input: [], reasoning: null, levels: [], contextWindow: '', maxTokens: '64K' })!.maxTokens).toBe(65536)
+    expect(entryFromDraft({ input: [], reasoning: null, levels: [], contextWindow: '', maxTokens: '1M' })!.maxTokens).toBe(1_048_576)
+    expect(() => entryFromDraft({ input: [], reasoning: null, levels: [], contextWindow: '', maxTokens: '2M' })).toThrow('max-tokens-invalid')
+    expect(() => entryFromDraft({ input: [], reasoning: null, levels: [], contextWindow: '', maxTokens: '-5' })).toThrow('max-tokens-invalid')
   })
 })
 
 describe('entrySummary (one-line row text)', () => {
   it('joins raw modality ids, reasoning, and window with placeholders', () => {
     const summary = entrySummary({ input: ['text', 'image'], reasoning: ['low', 'high'], contextWindow: 1048576 }, t)
-    expect(summary).toBe('text / image · low / high · 1048576')
+    expect(summary).toBe('text / image · low / high · 1M')
     expect(entrySummary(undefined, t)).toBe(`— · 未声明 · —`)
     expect(entrySummary({ reasoning: false }, t)).toContain('非推理')
+  })
+
+  it('1M-compacts the context window and appends the output segment only when set', () => {
+    expect(entrySummary({ contextWindow: 131072 }, t)).toBe('— · 未声明 · 128k')
+    expect(entrySummary({ contextWindow: 131072, maxTokens: 65536 }, t)).toBe('— · 未声明 · 128k · 出 64k')
+    expect(entrySummary({ maxTokens: 1_048_576 }, t)).toContain('出 1M')
   })
 })

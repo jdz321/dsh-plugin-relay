@@ -78,20 +78,21 @@ export const CONTEXT_WINDOW_MAX = 10_000_000
 const SUFFIX_FACTORS: Record<string, number> = { k: 1024, m: 1024 ** 2, b: 1024 ** 3 }
 
 /**
- * Parse a context-window text input into tokens. Accepts plain digits plus a
+ * Parse a token-count text input into tokens. Accepts plain digits plus a
  * K/M/B suffix (case-insensitive, 1024-based — `1M` = 1,048,576, matching the
  * `128K = 131072` industry convention); whitespace, commas, and underscores
  * are ignored (`1_048_576` and `1,048,576` both parse). Returns null for
- * anything else — decimals, signs, unknown suffixes, 0, or values past
- * CONTEXT_WINDOW_MAX (the host would reject them anyway).
+ * anything else — decimals, signs, unknown suffixes, 0, or values past `max`
+ * (the host would reject them anyway). The context window caps at 10M, the
+ * output limit (maxTokens) at 1,048,576.
  */
-export function parseContextWindow(text: string): number | null {
+export function parseContextWindow(text: string, max: number = CONTEXT_WINDOW_MAX): number | null {
   const cleaned = text.replace(/[\s,_]/g, '')
   const match = /^(\d+)([kKmMbB]?)$/.exec(cleaned)
   if (!match) return null
   const factor = match[2] ? SUFFIX_FACTORS[match[2].toLowerCase()]! : 1
   const value = Number(match[1]) * factor
-  if (!Number.isSafeInteger(value) || value <= 0 || value > CONTEXT_WINDOW_MAX) return null
+  if (!Number.isSafeInteger(value) || value <= 0 || value > max) return null
   return value
 }
 

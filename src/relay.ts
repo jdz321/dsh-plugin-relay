@@ -16,6 +16,11 @@ export const TOKEN_STATUS: Record<number, string> = {
 }
 
 export class RelayAuthError extends Error {
+  /** HTTP status the panel answered with, when the failure was an HTTP 401. */
+  status?: number
+  /** The panel's own message (HttpError.detail), kept for error classification. */
+  detail?: string
+
   constructor(message: string) {
     super(message)
     this.name = 'RelayAuthError'
@@ -118,7 +123,7 @@ export class Relay {
       authorization: `Bearer ${this.accessToken}`,
       'new-api-user': String(this.userId),
       accept: 'application/json',
-      'user-agent': 'dsh-plugin-relay/0.5',
+      'user-agent': 'dsh-plugin-relay/0.6',
     }
   }
 
@@ -144,7 +149,11 @@ export class Relay {
       })
     } catch (err) {
       if ((err as { status?: number })?.status === 401) {
-        throw new RelayAuthError(`中转站鉴权失败（401）: ${(err as { detail?: string }).detail ?? (err as Error).message}`)
+        const detail = (err as { detail?: string }).detail ?? (err as Error).message
+        const authError = new RelayAuthError(`中转站鉴权失败（401）: ${detail}`)
+        authError.status = 401
+        authError.detail = detail
+        throw authError
       }
       throw err
     }

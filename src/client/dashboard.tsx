@@ -1,17 +1,18 @@
 /**
  * The 「数据看板」 tab: balance / today / totals cards plus a stacked
- * per-model bar chart of the last N days, with a 消耗金额 / Token 量 metric
- * toggle. Charts come from recharts (bundled into the client artifact;
- * react stays external). The chart palette is read from the shell's design
- * tokens at render time with fixed fallbacks.
+ * per-model bar chart of the last N days (7 / 14 / 30), with a 消耗金额 /
+ * Token 量 metric toggle and click-to-hide chart legend. The chart is the
+ * hand-written SVG stacked bar (dashboard-chart.tsx) — recharts is gone. The
+ * chart palette is read from the shell's design tokens at render time with
+ * fixed fallbacks.
  */
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { Bar, BarChart, CartesianGrid, Legend, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
 import { Button, Pill } from '@deepseek-ai/dsh-client-ui-primitives'
 
 import { apiGet } from './api.js'
-import { tokenCountText, type Translator } from './locale.js'
+import { StackedBarChart } from './dashboard-chart.js'
+import type { Translator } from './locale.js'
 
 /** One aggregated cell from GET /api/relay/dashboard. */
 export interface UsageBucket {
@@ -40,8 +41,12 @@ interface DashboardPayload {
 
 type Metric = 'cny' | 'tokens'
 
-export interface DashboardViewProps {
+const DAY_CHOICES = [7, 14, 30] as const
+
+export interface DashboardTabProps {
   t: Translator
+  /** Owning panel id. */
+  panel: string
 }
 
 /** Design-token chart palette, resolved from the shell's computed styles. */
@@ -77,16 +82,18 @@ export function pivotBuckets(buckets: readonly UsageBucket[], metric: Metric): {
   return { rows, models }
 }
 
-export function DashboardTab({ t }: DashboardViewProps): JSX.Element {
+export function DashboardTab({ t, panel }: DashboardTabProps): JSX.Element {
   const [data, setData] = useState<DashboardData | null>(null)
   const [warning, setWarning] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
   const [metric, setMetric] = useState<Metric>('cny')
+  const [days, setDays] = useState<number>(7)
+  const [hidden, setHidden] = useState<ReadonlySet<string>>(new Set())
 
-  const refresh = useCallback((): void => {
+  const refresh = useCallback((targetDays: number): void => {
     setLoading(true)
-    apiGet('/api/relay/dashboard?days=7')
+    apiGet(`/api/relay/dashboard?panel=${encodeURIComponent(panel)}&days=${targetDays}`)
       .then((body) => {
         const payload = body as unknown as DashboardPayload
         if (payload.ok) {
@@ -99,13 +106,36 @@ export function DashboardTab({ t }: DashboardViewProps): JSX.Element {
       })
       .catch((err) => setError(err instanceof Error ? err.message : String(err)))
       .finally(() => setLoading(false))
-  }, [])
+  }, [panel])
   useEffect(() => {
-    refresh()
-  }, [refresh])
+    refresh(days)
+  }, [refresh, days])
 
   const { rows, models } = useMemo(() => pivotBuckets(data?.buckets ?? [], metric), [data, metric])
   const palette = useChartPalette(models.length)
+  const visible = useMemo(() => models.filter((model) => !hidden.has(model)), [models, hidden])
+  const lookup = useCallback((date: string, model: string): { quota: number, tokens: number } | null => {
+    const cell = (data?.buckets ?? []).find((bucket) => bucket.date === date && bucket.model === model)
+    return cell ?? null
+  }, [data])
+  // Rescale when visibility changes: only visible series count toward the max.
+  const yMax = useMemo(() => {
+    let max = 0
+    for (const row of rows) {
+      let total = 0
+      for (const model of visible) total += Number(row[model] ?? 0)
+      max = Math.max(max, total)
+    }
+    return max
+  }, [rows, visible])
+  const toggle = (model: string): void => {
+    setHidden((current) => {
+      const next = new Set(current)
+      if (next.has(model)) next.delete(model)
+      else next.add(model)
+      return next
+    })
+  }
 
   if (error !== null) {
     return (
@@ -122,7 +152,7 @@ export function DashboardTab({ t }: DashboardViewProps): JSX.Element {
           <div className="relay_cardTitle">{t('dashTitle')}</div>
           <p className="relay_metaLine">{t('dashIntro')}</p>
         </div>
-        <Button variant="ghost" size="sm" disabled={loading} onClick={refresh}>
+        <Button variant="ghost" size="sm" disabled={loading} onClick={() => refresh(days)}>
           {loading ? t('refreshing') : t('dashRefresh')}
         </Button>
       </div>
@@ -152,6 +182,11 @@ export function DashboardTab({ t }: DashboardViewProps): JSX.Element {
             <div className="relay_dashChartHead">
               <span className="relay_cardTitle">{t('dashChartTitle')(data.days)}</span>
               <div className="relay_row">
+                {DAY_CHOICES.map((choice) => (
+                  <Pill key={choice} active={days === choice} onClick={() => setDays(choice)}>
+                    {t('dashDays')(choice)}
+                  </Pill>
+                ))}
                 {(['cny', 'tokens'] as const).map((candidate) => (
                   <Pill
                     key={candidate}
@@ -163,21 +198,32 @@ export function DashboardTab({ t }: DashboardViewProps): JSX.Element {
                 ))}
               </div>
             </div>
-            {rows.length === 0 ? <div className="relay_empty">{t('dashEmpty')}</div> : (
-              <div className="relay_chart">
-                <ResponsiveContainer width="100%" height={220}>
-                  <BarChart data={rows} margin={{ top: 8, right: 8, bottom: 0, left: 0 }}>
-                    <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="var(--dsw-alias-border-l4, #333)" />
-                    <XAxis dataKey="date" tickMargin={4} />
-                    <YAxis width={52} tickFormatter={(value: number) => (metric === 'cny' ? `¥${value}` : tokenCountText(value))} />
-                    <Tooltip />
-                    <Legend />
-                    {models.map((model, index) => (
-                      <Bar key={model} dataKey={model} stackId="usage" fill={palette[index % palette.length]!} />
-                    ))}
-                  </BarChart>
-                </ResponsiveContainer>
-              </div>
+            {rows.length === 0 || visible.length === 0 ? <div className="relay_empty">{t('dashEmpty')}</div> : (
+              <>
+                <StackedBarChart
+                  rows={rows}
+                  models={models}
+                  visible={visible}
+                  colors={palette}
+                  metric={metric}
+                  yMax={yMax}
+                  lookup={lookup}
+                />
+                <div className="relay_chartLegend">
+                  {models.map((model, index) => (
+                    <button
+                      key={model}
+                      type="button"
+                      className={hidden.has(model) ? 'relay_chartLegendItem relay_chartLegendOff' : 'relay_chartLegendItem'}
+                      title={model}
+                      onClick={() => toggle(model)}
+                    >
+                      <span className="relay_chartSwatch" style={{ background: palette[index % palette.length] }} />
+                      {model}
+                    </button>
+                  ))}
+                </div>
+              </>
             )}
           </div>
         </>

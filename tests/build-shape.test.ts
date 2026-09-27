@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process'
-import { readFileSync } from 'node:fs'
+import { readFileSync, statSync } from 'node:fs'
 import nodePath from 'node:path'
 import vm from 'node:vm'
 import { describe, expect, it } from 'vitest'
@@ -44,9 +44,22 @@ describe('host entry', () => {
     expect(hostEntry.name).toBe('relay')
     expect(typeof hostEntry.apply).toBe('function')
     const config = (hostEntry.Config as unknown as (v: unknown) => Record<string, unknown>)({})
-    expect(config.baseUrl).toBe('')
-    expect(config.route).toBe('relay')
-    expect(config.keyRef).toBe('RELAY_API_KEY')
+    // v0.6.0: the connection fields live in the panels dict; no legacy flat
+    // route/keyRef base remains (no backward-compat — the plugin is unreleased)
+    expect(Object.keys(config).sort()).toEqual(['capabilityCatalog', 'capabilityOverrides', 'panels'])
+  })
+
+  it('marks the nested panel access token as a secret in the schema envelope', () => {
+    // The redact walker walks object-in-dict by schema: the wire surfaces drop
+    // `panels.<id>.accessToken` exactly because this role tag is present (and
+    // the field must stay default-less so the envelope carries no value).
+    const config = hostEntry.Config as unknown as Record<string, any>
+    const panels = config.dict.panels
+    expect(panels.type).toBe('dict')
+    expect(panels.inner.type).toBe('object')
+    const token = panels.inner.dict.accessToken
+    expect(token.meta?.role).toBe('secret')
+    expect(token.meta?.default).toBeUndefined()
   })
 })
 
@@ -84,15 +97,22 @@ describe('built artifacts', () => {
     expect(typeof exportsFace.apply).toBe('function')
     expect(Array.isArray(exportsFace.inject)).toBe(true)
     // react family + the primitives package come from the shell's frozen
-    // module table; everything else — the chart library included — is bundled.
-    // (react-dom/client stays declared external in tsdown but the artifact
-    // itself never requests it: the shell renders our component.)
+    // module table; everything else (the SVG chart included) is bundled.
+    // (react-dom / react-dom/client stay declared external in tsdown but the
+    // artifact never requests them: the shell renders our component, and the
+    // primitives only consume react itself.)
     expect([...new Set(requested)].sort()).toEqual([
       '@deepseek-ai/dsh-client-ui-primitives',
       'react',
-      'react-dom',
       'react/jsx-runtime',
     ])
+  })
+
+  it('lib/client.js stays under the 350KB (minified) size cap', () => {
+    const stats = statSync(nodePath.join(ROOT, 'lib/client.js'))
+    // recharts (~770KB of the v0.5.1 artifact) is gone, replaced by the
+    // hand-written SVG chart; the cap keeps the bundle from ever regressing.
+    expect(stats.size).toBeLessThanOrEqual(350 * 1024)
   })
 
   it('lib/index.js is Node ESM importing only externals (dsh packages and node builtins)', () => {
@@ -126,6 +146,7 @@ describe('naming audit (no vendor-specific tokens in the deliverable)', () => {
     'docs/SPEC-0.4.0.md',
     'docs/SPEC-0.5.0.md',
     'docs/SPEC-0.5.1.md',
+    'docs/SPEC-0.6.0.md',
     'docs/PUBLISHING.md',
     'package.json',
   ]

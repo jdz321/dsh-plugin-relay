@@ -80,11 +80,13 @@ function costCny(quota: number): string {
 
 export interface LogsTabProps {
   t: Translator
+  /** Owning panel id — every request addresses this panel. */
+  panel: string
   /** Key names for the key filter dropdown (from the API Keys tab data). */
   keyNames: string[]
 }
 
-export function LogsTab({ t, keyNames }: LogsTabProps): JSX.Element {
+export function LogsTab({ t, panel, keyNames }: LogsTabProps): JSX.Element {
   const [filters, setFilters] = useState<Filters>(defaultFilters)
   const [applied, setApplied] = useState<Filters>(defaultFilters)
   const [page, setPage] = useState(1)
@@ -103,11 +105,12 @@ export function LogsTab({ t, keyNames }: LogsTabProps): JSX.Element {
     if (target.modelName) params.set('modelName', target.modelName)
     if (target.tokenName) params.set('tokenName', target.tokenName)
     if (target.group) params.set('group', target.group)
+    params.set('panel', panel)
     apiGet(`/api/relay/logs?${params.toString()}`)
       .then((body) => setData(body as unknown as LogsPayload))
       .catch((err) => setData({ ok: false, error: err instanceof Error ? err.message : String(err) }))
       .finally(() => setLoading(false))
-    const statParams = new URLSearchParams()
+    const statParams = new URLSearchParams({ panel })
     if (Number.isFinite(start)) statParams.set('start', String(start))
     if (Number.isFinite(end)) statParams.set('end', String(end))
     apiGet(`/api/relay/logs-stat?${statParams.toString()}`)
@@ -116,11 +119,11 @@ export function LogsTab({ t, keyNames }: LogsTabProps): JSX.Element {
         setStat(payload.ok ? payload.stat ?? null : null)
       })
       .catch(() => setStat(null))
-  }, [])
+  }, [panel])
 
   useEffect(() => {
     fetchPage(defaultFilters(), 1)
-    apiGet('/api/relay/logs-meta')
+    apiGet(`/api/relay/logs-meta?panel=${encodeURIComponent(panel)}`)
       .then((body) => setMeta(body as unknown as MetaPayload))
       .catch(() => setMeta({ ok: false }))
   }, [fetchPage])

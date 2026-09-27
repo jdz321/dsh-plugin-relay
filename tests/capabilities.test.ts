@@ -72,7 +72,19 @@ describe('mapModelsDevEntry context window (limit.context)', () => {
       reasoning: false,
       limit: { context: 131072, output: 8192 },
     }
-    expect(mapModelsDevEntry(entry)).toEqual({ input: ['text'], reasoning: false, contextWindow: 131072 })
+    expect(mapModelsDevEntry(entry)).toEqual({ input: ['text'], reasoning: false, contextWindow: 131072, maxTokens: 8192 })
+  })
+
+  it('extracts limit.output as maxTokens when it is a positive integer; merges the largest', () => {
+    expect(mapModelsDevEntry({ modalities: { input: ['text'] }, limit: { context: 1000, output: 0 } })?.maxTokens).toBeUndefined()
+    expect(mapModelsDevEntry({ modalities: { input: ['text'] }, limit: { context: 1000, output: 1.5 } })?.maxTokens).toBeUndefined()
+    const merged = mergeSuggestions([
+      mapModelsDevEntry({ modalities: { input: ['text'] }, limit: { context: 1000, output: 8192 } }),
+      mapModelsDevEntry({ modalities: { input: ['text'] }, limit: { context: 1000, output: 65536 } }),
+    ])
+    expect(merged?.maxTokens).toBe(65536)
+    expect(merged?.contextWindow).toBe(1000)
+    expect(mergeSuggestions([mapModelsDevEntry({ modalities: { input: ['text'] } })])?.maxTokens).toBeUndefined()
   })
 
   it('ignores missing or non-positive limits; keeps entries with data otherwise', () => {

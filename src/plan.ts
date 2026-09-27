@@ -1,7 +1,7 @@
 /**
  * Core relay operations behind the fetch routes: key picking, model
- * discovery, switch planning, and the settings-section shape. Pure logic —
- * the host entry applies plans through ctx.settings / ctx.credentials.
+ * discovery, switch planning, and key metadata shaping. Pure logic — the
+ * host entry applies plans through ctx.settings / ctx.credentials.
  *
  * Since v0.5.0 the plugin does NOT manage a "default model": dsh picks the
  * model per conversation/session on its own (its `agent-default-model`
@@ -9,57 +9,7 @@
  * the route profile, and the synced catalog.
  */
 
-import { KEY_REF_DEFAULT, ROUTE_DEFAULT } from './constants.js'
 import { Relay, type RelayToken } from './relay.js'
-
-/** The plugin's settings section shape (connection + routing metadata). */
-export interface Section {
-  baseUrl: string
-  relayKind: string
-  accessToken: string
-  userId: number
-  keyRef: string
-  route: string
-  selectedKeyName: string
-}
-
-/** Baseline section values; the bundle patch row and schema repeat these. */
-export const SECTION_DEFAULTS: Readonly<Section> = Object.freeze({
-  baseUrl: '',
-  relayKind: 'new-api',
-  accessToken: '',
-  userId: 0,
-  keyRef: KEY_REF_DEFAULT,
-  route: ROUTE_DEFAULT,
-  selectedKeyName: '',
-})
-
-/** Merge one stored `relay` section over the defaults. */
-export function resolveSection(section: Partial<Section> | null | undefined): Section {
-  return {
-    ...SECTION_DEFAULTS,
-    ...(section ?? {}),
-  }
-}
-
-/** Build a Relay client from a resolved section. */
-export function relayFromSection(section: Section, timeoutMs = 20000, proxy: string | null = null): Relay {
-  return new Relay({
-    baseUrl: section.baseUrl,
-    accessToken: section.accessToken,
-    userId: section.userId,
-    proxy,
-    timeoutMs,
-  })
-}
-
-/** Whether a section carries everything the management API needs. */
-export function missingSetup(section: Section): 'baseUrl' | 'accessToken' | 'userId' | null {
-  if (!section.baseUrl) return 'baseUrl'
-  if (!section.accessToken) return 'accessToken'
-  if (!section.userId || Number(section.userId) <= 0) return 'userId'
-  return null
-}
 
 /** Quota points → CNY estimate (one-api family: 500000 points ≈ $1). */
 export function formatQuota(quota: number | undefined | null): string {
@@ -103,15 +53,6 @@ export function keySummary(token: RelayToken, { selectedName = '', groupRatio = 
     neverExpires: token.neverExpires,
     expiredTime: token.expiredTime,
     selected: token.name === selectedName,
-  }
-}
-
-/** The pi-ai route profile fields derived from the connection settings. */
-export function routeProfileFields(section: Section): { api: string, baseURL: string, apiKeyEnv: string } {
-  return {
-    api: 'openai-completions',
-    baseURL: `${section.baseUrl.replace(/\/+$/, '')}/v1`,
-    apiKeyEnv: section.keyRef,
   }
 }
 
@@ -165,11 +106,10 @@ export class KeyNotFoundError extends Error {
  */
 export async function planSwitch(opts: {
   relay: Relay
-  section: Section
   idOrName: string
   noModels?: boolean
 }): Promise<SwitchPlan> {
-  const { relay, section, idOrName, noModels } = opts
+  const { relay, idOrName, noModels } = opts
   const tokens = await relay.listTokens()
   const token = pickToken(tokens, idOrName)
   if (!token) throw new KeyNotFoundError(idOrName)

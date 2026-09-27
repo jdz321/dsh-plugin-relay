@@ -3,73 +3,74 @@
  * Regenerate src/knowledge-preset.generated.ts — the compiled-in baseline of
  * the capability knowledge preset layer.
  *
- *   npm run preset:fetch [-- --panel https://panel.example.com]
+ *   npm run preset:fetch   # set OPENROUTER_API_KEY to fold in the usage backstop
  *
- * Sources: the panel's PUBLIC /api/pricing (no credentials read or sent; the
- * default panel origin is the repo .dsh-home/settings.yaml `relay.baseUrl` —
- * only that one field is read) plus https://models.dev/api.json via the usual
- * https_proxy env. Runs the src/*.ts builder directly through Node's type
- * stripping (scripts/ts-resolver.mjs maps the intra-source `.js` specifiers),
- * so the script and the runtime always share one implementation.
+ * v0.6.0 policy — the baseline is the models.dev MAINSTREAM only. The relay
+ * panel is no longer a source (no --panel flag, no .dsh-home parsing, no
+ * pricing fetch): the panel is only ever the matched object at runtime.
+ * Source: https://models.dev/api.json via the usual https_proxy env, filtered
+ * by the shared buildPresetEntries rules (first-party whitelist → 365-day
+ * window → non-dialogue excluded → channel dedup / rekey). Optional
+ * OpenRouter rankings backstop: with OPENROUTER_API_KEY set, the daily
+ * top-usage model slugs of the last 7 days are mapped onto models.dev names
+ * and admitted through the same filters; without a key the whitelist stands
+ * alone (full degradation).
+ *
+ * Runs the src/*.ts builder directly through Node's type stripping
+ * (scripts/ts-resolver.mjs maps the intra-source `.js` specifiers), so the
+ * script and the runtime always share one implementation.
  *
  * This is a pure codegen step: it only rewrites the generated source file and
  * never builds. lib/ artifacts pick the new baseline up through the normal
  * channels — `npm run build` like any src change locally, `prepublishOnly`
  * at publish time, and the build step of the CI workflows.
  *
- * The generated file is committed; its header carries counts only, never the
- * panel identity or anything account-specific.
+ * The generated file is committed; its header carries counts and dates only,
+ * never panel or account information.
  */
-import { readFileSync, statSync, writeFileSync } from 'node:fs'
+import { statSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { buildPresetEntries, panelModelNames, PRESET_MAX_AGE_DAYS, PRESET_PROVIDERS } from '../src/knowledge-preset.ts'
+import { openrouterCanonicalNames, buildPresetEntries, PRESET_MAX_AGE_DAYS, PRESET_PROVIDERS } from '../src/knowledge-preset.ts'
 import { envProxy, requestJson } from '../src/http.ts'
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const OUT = path.join(ROOT, 'src', 'knowledge-preset.generated.ts')
 
-const args = process.argv.slice(2)
-const panelArgIndex = args.indexOf('--panel')
-const panelArg = panelArgIndex >= 0 ? args[panelArgIndex + 1] : undefined
-
-/** Read relay.baseUrl from a dsh settings.yaml — top-level `relay:` block only. */
-function panelFromDshHome(file) {
-  let text
-  try {
-    text = readFileSync(file, 'utf8')
-  } catch {
-    return null
-  }
-  let inRelay = false
-  for (const line of text.split('\n')) {
-    if (/^relay:\s*$/.test(line)) {
-      inRelay = true
-      continue
-    }
-    if (!inRelay) continue
-    if (/^\S/.test(line)) break // next top-level section
-    const match = line.match(/^\s+baseUrl:\s*(.+?)\s*$/)
-    if (match) return match[1].replace(/^['"]|['"]$/g, '')
-  }
-  return null
-}
-
-const panel = (panelArg || panelFromDshHome(path.join(ROOT, '.dsh-home', 'settings.yaml')) || '').replace(/\/+$/, '')
 const proxy = envProxy()
 
-let panelModels = null
-if (panel) {
-  const body = await requestJson({ url: `${panel}/api/pricing`, headers: { accept: 'application/json' }, proxy, timeoutMs: 30000 })
-  panelModels = panelModelNames(body)
-  if (!panelModels) console.log(`panel ${new URL(panel).host}: /api/pricing present but carries no model table — continuing with whitelist only`)
+const doc = await requestJson({ url: 'https://models.dev/api.json', headers: { accept: 'application/json' }, proxy, timeoutMs: 30000 })
+
+// Optional OpenRouter usage backstop (build-time only; the runtime refresh
+// never introduces new credentials). Failures degrade to whitelist-only.
+let openrouterNames = null
+let openrouterDate = null
+const openrouterKey = process.env.OPENROUTER_API_KEY
+if (openrouterKey) {
+  try {
+    const rankings = await requestJson({
+      url: 'https://openrouter.ai/api/v1/datasets/rankings-daily',
+      headers: { accept: 'application/json', authorization: `Bearer ${openrouterKey}` },
+      proxy,
+      timeoutMs: 30000,
+    })
+    const slugs = []
+    const rows = Array.isArray(rankings?.data) ? rankings.data : Array.isArray(rankings) ? rankings : []
+    for (const row of rows) {
+      if (typeof row?.model_permaslug === 'string' && row.model_permaslug) slugs.push(row.model_permaslug)
+      if (typeof row?.day === 'string' && (!openrouterDate || row.day > openrouterDate)) openrouterDate = row.day
+    }
+    openrouterNames = openrouterCanonicalNames(slugs, doc)
+    console.log(`openrouter backstop: ${slugs.length} ranking slugs → ${openrouterNames.length} models.dev names${openrouterDate ? ` (day ${openrouterDate})` : ''}`)
+  } catch (err) {
+    console.log(`note: OpenRouter backstop failed (${err instanceof Error ? err.message : err}); continuing whitelist-only`)
+  }
 } else {
-  console.log('no panel origin (--panel missing, .dsh-home/settings.yaml has no relay.baseUrl) — continuing with whitelist only')
+  console.log('no OPENROUTER_API_KEY — continuing whitelist-only (the backstop is optional)')
 }
 
-const doc = await requestJson({ url: 'https://models.dev/api.json', headers: { accept: 'application/json' }, proxy, timeoutMs: 30000 })
-const built = buildPresetEntries(panelModels, doc)
+const built = buildPresetEntries(doc, { ...(openrouterNames ? { openrouterNames } : {}) })
 const providersSeen = PRESET_PROVIDERS.filter((p) => doc[p]?.models).length
 const missingProviders = PRESET_PROVIDERS.filter((p) => !doc[p]?.models)
 if (missingProviders.length) console.log(`note: whitelist providers absent from api.json: ${missingProviders.join(', ')}`)
@@ -77,20 +78,20 @@ if (missingProviders.length) console.log(`note: whitelist providers absent from 
 const header = [
   '// Generated by `npm run preset:fetch` — do not edit.',
   `// Sources: models.dev api.json @ ${new Date().toISOString().slice(0, 10)} (${providersSeen}/${PRESET_PROVIDERS.length} whitelist providers present)`,
-  `// Policy: models released within the last ${PRESET_MAX_AGE_DAYS} days only (built ${new Date().toISOString().slice(0, 10)}).`,
-  panel
-    ? `//        + panel pricing (public endpoint): ${built.panelTotal} ids → ${built.panelTotal - built.dropped.length} matched${built.panelOnlyNames.length ? `, ${built.panelOnlyNames.length} outside the whitelist` : ''}`
-    : '//        (no panel origin — whitelist providers only)',
-  ...(built.dropped.length ? [`// Panel-specific ids dropped (no models.dev match): ${built.dropped.join(', ')}`] : []),
+  `// Policy: mainstream only — first-party whitelist, released within the last ${PRESET_MAX_AGE_DAYS} days,`,
+  '//         non-dialogue models excluded, channel re-registrations deduped/rekeyed.',
+  `// Built ${new Date().toISOString().slice(0, 10)}: ${built.agedOut} aged out, ${built.nonDialogue} non-dialogue excluded,` +
+    ` ${built.channelDropped.length} channel dups dropped, ${built.rekeyed.length} rekeyed` +
+    (openrouterNames ? `, ${built.openrouterNames.length} via OpenRouter @ ${openrouterDate ?? '?'}` : '') +
+    '.',
 ]
-const body = `export const KNOWLEDGE_PRESET: Record<string, { input?: string[], reasoning?: false | string[], contextWindow?: number }> = ${JSON.stringify(built.entries, null, 2)}\n`
+const body = `export const KNOWLEDGE_PRESET: Record<string, { input?: string[], reasoning?: false | string[], contextWindow?: number, maxTokens?: number }> = ${JSON.stringify(built.entries, null, 2)}\n`
 
 writeFileSync(OUT, `${header.join('\n')}\n${body}\n`)
 
 const size = statSync(OUT).size
 console.log(`preset entries: ${Object.keys(built.entries).length}`)
 console.log(`  whitelist providers: ${providersSeen} (${PRESET_PROVIDERS.join(', ')})`)
-if (panelModels) {
-  console.log(`  panel ids: ${built.panelTotal}, matched: ${built.panelTotal - built.dropped.length}, dropped: ${built.dropped.length}${built.dropped.length ? ` (${built.dropped.join(', ')})` : ''}`)
-}
+console.log(`  excluded: ${built.agedOut} aged out / ${built.nonDialogue} non-dialogue; channel dedup: ${built.channelDropped.length} dropped, ${built.rekeyed.length} rekeyed`)
+if (openrouterNames) console.log(`  openrouter adds: ${built.openrouterNames.length} (${built.openrouterNames.join(', ')})`)
 console.log(`wrote ${path.relative(ROOT, OUT)} (${size} bytes)`)

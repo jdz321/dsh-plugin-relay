@@ -41,8 +41,8 @@ npm publish        # prepublishOnly 会先跑 typecheck + build
   name: <owner>/dsh-plugin-relay
   category: model                                    # Models & Providers 分类
   description:
-    en: Connects DeepSeek Harness to any new-api-family relay panel (one-api / new-api / Veloera / done-hub): manage the connection, browse and switch API keys, sync each key's model list with pricing, and configure per-model input modalities and reasoning efforts from the web settings page.
-    zh: 把 DeepSeek Harness 接入任意 new-api 系中转站面板（one-api / new-api / Veloera / done-hub）：维护连接、浏览与切换 API key、同步各 key 的模型与价格，并在设置页配置每个模型的输入模态与推理档位。
+    en: Connects DeepSeek Harness to any new-api-family relay panel (one-api / new-api / Veloera / done-hub), several at once as separate model providers: manage panels and API keys, sync model lists with pricing, review usage, and configure model capabilities from a knowledge base in the web settings page.
+    zh: 把 DeepSeek Harness 接入任意 new-api 系中转站面板（one-api / new-api / Veloera / done-hub），支持多套面板同时生效：维护面板与 API key、同步模型与价格、查看用量，并在设置页以知识库配置模型能力。
   ```
 
   规则：描述会被评审者对照代码逐句核对（数字、端点名都要属实）；含 `: ` 的描述必须加引号；一个 PR 最多 3 条，我们只有 1 条；**只改自己的条目文件**。
@@ -66,9 +66,9 @@ npm publish        # prepublishOnly 会先跑 typecheck + build
 
 ## 7. 预置知识库基线（维护节奏）
 
-- [ ] **每周自动**：`preset-refresh` workflow（每 7 天，cron 在 workflow 顶部可改）跑 `preset:fetch` 与已提交基线 diff，有漂移自动开 PR 供审阅——**不自动合并**；CI 无面板源，跑的是 models.dev 白名单口径（v0.5.1 面板源基线在位期间，PR 会同时去掉面板派生条目，审阅时注意；SPEC-0.6.0 落地后即为纯漂移）。
-- [ ] 主流模型发布潮后也可手动跑 `npm run preset:fetch`（读 `.dsh-home` 的面板地址与 models.dev，全程无凭据），diff 产物 `src/knowledge-preset.generated.ts` 并随代码一起提交。
-- [ ] 生成文件头部只允许计数信息——**不得**出现面板地址、账号等任何身份信息。
+- [ ] **每周自动**：`preset-refresh` workflow（每 7 天，cron 在 workflow 顶部可改）跑 `preset:fetch` 与已提交基线 diff，有漂移自动开 PR 供审阅——**不自动合并**。v0.6.0 起基线是**纯 models.dev 主流口径**（第一方白名单 / 365 天窗口 / 非对话剔除 / 渠道去重），workflow diff 即纯数据漂移，无过渡期噪声。
+- [ ] 主流模型发布潮后也可手动跑 `npm run preset:fetch`（只读 models.dev，全程无凭据、不触碰任何面板），diff 产物 `src/knowledge-preset.generated.ts` 并随代码一起提交。
+- [ ] 生成文件头部只允许 models.dev 日期与计数——**不得**出现面板地址、账号等任何身份信息。
 
 ## 8. 发版节奏（后续版本，自动化后；commit 由开发会话执行，push 一律由维护者确认审计后手动完成）
 

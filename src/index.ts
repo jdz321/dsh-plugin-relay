@@ -1,23 +1,26 @@
 /**
  * Host entry for dsh-plugin-relay.
  *
- * Owns the `relay` settings namespace (relay base URL, access token, user
- * id, active key metadata, capability knowledge base, per-id capability
- * overrides) and serves the /api/relay/* fetch routes the web settings page
- * talks to: connection state, key browsing / switching / CRUD, per-key model
- * pricing with catalog sync, the capability knowledge base with route
- * replay, usage dashboard, and usage logs. Works with any new-api family
- * relay panel.
+ * Owns the `relay` settings namespace — since v0.6.0 a `panels` dict where
+ * EVERY panel is its own pi-ai provider (route key = panel id), plus the
+ * global capability knowledge base and the per-panel per-id capability
+ * overrides — and serves the /api/relay/* fetch routes the web settings page
+ * talks to: panel CRUD summaries, per-panel key browsing / switching / CRUD,
+ * per-key model pricing with catalog sync, the capability knowledge base with
+ * route replay, connection testing, usage dashboard, and usage logs. Works
+ * with any new-api family relay panel; several panels live at once.
  */
 
 import Schema from '@deepseek-ai/schemastery'
 
 import { applyCapabilityOps } from './capability-ops.js'
-import { ModelsDevClient, type ModelsDevDocument } from './capabilities.js'
-import { CLIENT_MODULE_ID, KEY_REF_DEFAULT, NAMESPACE, PLUGIN_NAME, ROUTE_DEFAULT } from './constants.js'
+import { ModelsDevClient } from './capabilities.js'
+import { CLIENT_MODULE_ID, NAMESPACE, PLUGIN_NAME } from './constants.js'
+import { testPanelConnection } from './connection-test.js'
 import { envProxy } from './http.js'
 import {
   deriveCapabilityFor,
+  knowledgeForPanel,
   normalizeKnowledgeConfig,
   type CatalogEntry,
   type KnowledgeConfig,
@@ -27,15 +30,19 @@ import { KNOWLEDGE_PRESET } from './knowledge-preset.generated.js'
 import {
   formatQuota,
   keySummary,
-  missingSetup,
   planSwitch,
-  relayFromSection,
-  resolveSection,
-  SECTION_DEFAULTS,
-  type Section,
   type SwitchPlan,
 } from './plan.js'
+import {
+  missingPanelSetup,
+  panelHost,
+  panelsOf,
+  relayFromPanel,
+  type PanelConfig,
+} from './panels.js'
+import { createPanel, deletePanel, PanelRequestError, updatePanel } from './panels-ops.js'
 import { groupRatioOf, priceEntry } from './pricing.js'
+import { refreshPresetAndReplay } from './refresh.js'
 import { ensureRouteProfile, storedRouteProfile, syncRouteCatalog } from './route-config.js'
 import type { CredentialsService, HostContext, SchemaType, SettingsService } from './types.js'
 import { aggregateDailyBuckets, buildDashboardView, normalizeLog, startOfDaysAgo, startOfToday } from './usage.js'
@@ -43,36 +50,42 @@ import { aggregateDailyBuckets, buildDashboardView, normalizeLog, startOfDaysAgo
 /** Stable Cordis plugin name. */
 export const name = PLUGIN_NAME
 
-/** Capability knowledge entry schema (both dicts share the entry shape). */
+/** Capability knowledge entry schema (all three dicts share the entry shape). */
 const CapabilityEntrySchema = Schema.object({
   input: Schema.array(Schema.string()),
   reasoning: Schema.union([Schema.boolean(), Schema.array(Schema.string())]),
   contextWindow: Schema.number(),
+  maxTokens: Schema.number(),
+})
+
+/**
+ * One panel config. The id IS the pi-ai provider route key and display name
+ * (immutable after creation); the access token is write-only — no default
+ * and not required, so the redacted wire view (schema envelope included)
+ * never carries a value and the client decode of the redacted section stays
+ * valid.
+ */
+const PanelSchema = Schema.object({
+  id: Schema.string(),
+  baseUrl: Schema.string(),
+  relayKind: Schema.string().default('new-api'),
+  accessToken: Schema.string().role('secret'),
+  userId: Schema.number(),
+  keyRef: Schema.string(),
+  selectedKeyName: Schema.string(),
 })
 
 /** Composition schema; resolved values are the settings `base` layer. */
 export interface PluginConfig {
-  baseUrl: string
-  relayKind: string
-  accessToken: string
-  userId: number
-  keyRef: string
-  route: string
-  selectedKeyName: string
+  panels: Record<string, unknown>
   capabilityCatalog: Record<string, unknown>
-  capabilityOverrides: Record<string, unknown>
+  capabilityOverrides: Record<string, Record<string, unknown>>
 }
 
 const configShape = {
-  baseUrl: Schema.string().default(SECTION_DEFAULTS.baseUrl),
-  relayKind: Schema.string().default(SECTION_DEFAULTS.relayKind),
-  accessToken: Schema.string().role('secret').default(SECTION_DEFAULTS.accessToken),
-  userId: Schema.number().default(SECTION_DEFAULTS.userId),
-  keyRef: Schema.string().default(SECTION_DEFAULTS.keyRef),
-  route: Schema.string().default(SECTION_DEFAULTS.route),
-  selectedKeyName: Schema.string().default(SECTION_DEFAULTS.selectedKeyName),
+  panels: Schema.dict(PanelSchema),
   capabilityCatalog: Schema.dict(CapabilityEntrySchema),
-  capabilityOverrides: Schema.dict(CapabilityEntrySchema),
+  capabilityOverrides: Schema.dict(Schema.dict(CapabilityEntrySchema)),
 }
 
 export const Config: SchemaType<PluginConfig> = Schema.object(configShape) as SchemaType<PluginConfig>
@@ -115,13 +128,34 @@ async function activeCredential(keyRef: string): Promise<string | null> {
   }
 }
 
-/** The effective connection section: stored values over the schema defaults. */
-function currentSection(): Section {
-  if (!settingsService) return resolveSection(null)
-  return resolveSection(safeGet(NAMESPACE) as Partial<Section> | undefined)
+/** Stored panels, read through the safe getter. */
+function currentPanels(): PanelConfig[] {
+  return panelsOf(safeGet(NAMESPACE))
 }
 
-/** The plugin-owned capability config (knowledge base + overrides). */
+/** One stored panel by id, or null. */
+function currentPanel(id: string): PanelConfig | null {
+  return currentPanels().find((panel) => panel.id === id) ?? null
+}
+
+/**
+ * Resolve the panel a request addresses: the explicit id when given, else
+ * the only panel when exactly one exists. Everything else is an error the
+ * client can show.
+ */
+function resolvePanel(explicit: unknown): PanelConfig {
+  const id = typeof explicit === 'string' ? explicit.trim() : ''
+  if (id) {
+    const panel = currentPanel(id)
+    if (!panel) throw new PanelRequestError(`找不到面板「${id}」`, 404)
+    return panel
+  }
+  const panels = currentPanels()
+  if (panels.length === 1) return panels[0]!
+  throw new PanelRequestError('缺少 panel 参数（当前存在多个面板）', 400)
+}
+
+/** The plugin-owned capability config (knowledge base + per-panel overrides). */
 function currentKnowledge(): KnowledgeConfig {
   return normalizeKnowledgeConfig(safeGet(NAMESPACE))
 }
@@ -143,12 +177,19 @@ function json(data: unknown, status = 200): Response {
   return Response.json(data, { status })
 }
 
-/** Wrap a fetch handler so internal failures surface as JSON, not a bare 400. */
+/**
+ * Wrap a fetch handler so internal failures surface as JSON, not a bare 400.
+ * Errors carrying a plausible HTTP status (PanelRequestError) keep it.
+ */
 function guarded(handler: (request: Request) => Promise<Response>): (request: Request) => Promise<Response> {
   return async (request) => {
     try {
       return await handler(request)
     } catch (err) {
+      const status = (err as { status?: number }).status
+      if (typeof status === 'number' && status >= 400 && status <= 599) {
+        return json({ ok: false, error: err instanceof Error ? err.message : String(err) }, status)
+      }
       return json({ ok: false, error: errorText(err) }, 500)
     }
   }
@@ -166,29 +207,11 @@ function groupOf(self: Record<string, unknown> | null): string {
   return typeof self?.group === 'string' ? self.group : ''
 }
 
-/** JSON-safe view of the integration state for the settings page. */
-async function buildState(section: Section) {
-  let credentialConfigured = false
-  try {
-    credentialConfigured = Boolean(await activeCredential(section.keyRef))
-  } catch {
-    /* credentials service unavailable in this composition */
-  }
-  const llmSection = safeGet('llm-pi-ai') as { providers?: Record<string, { models?: unknown[] }> } | undefined
-  const routeConfig = llmSection?.providers?.[section.route]
-  const models = Array.isArray(routeConfig?.models) ? routeConfig.models : []
+/** Diagnostic state for the settings page (panel data lives in /panels). */
+function buildState() {
   return {
     clientModuleId: CLIENT_MODULE_ID,
-    baseUrl: section.baseUrl,
-    relayKind: section.relayKind,
-    userId: section.userId > 0 ? section.userId : null,
-    accessTokenConfigured: Boolean(section.accessToken),
-    keyRef: section.keyRef,
-    route: section.route,
-    setupMissing: missingSetup(section),
-    selectedKeyName: section.selectedKeyName || '',
-    credentialConfigured,
-    modelCount: models.length,
+    panelCount: currentPanels().length,
     namespaceRegistered: safeGet(NAMESPACE) !== undefined,
     settingsRegistrationError,
     settingsReadError,
@@ -198,25 +221,26 @@ async function buildState(section: Section) {
 /** models.dev lookup, single instance per plugin process. */
 const modelsDev = new ModelsDevClient({ proxy: envProxy() })
 
-/** Debounced route-profile mirror after connection edits. */
+/** Debounced route-profile mirror after connection edits (every panel). */
 let mirrorTimer: ReturnType<typeof setTimeout> | null = null
 function scheduleRouteMirror(): void {
   if (!settingsService) return
   if (mirrorTimer) clearTimeout(mirrorTimer)
   mirrorTimer = setTimeout(() => {
     mirrorTimer = null
-    ensureRouteProfile(settingsService!, currentSection()).catch((err) => {
-      hostLogger?.warn('relay: route profile mirror failed', err)
-    })
+    for (const panel of currentPanels()) {
+      ensureRouteProfile(settingsService!, panel).catch((err) => {
+        hostLogger?.warn(`relay: route profile mirror failed for ${panel.id}`, err)
+      })
+    }
   }, 300)
 }
 
 /** The /keys response: account line, per-key metadata, usable groups — never key material. */
-async function keysResponse(): Promise<Response> {
-  const section = currentSection()
-  const missing = missingSetup(section)
+async function keysResponse(panel: PanelConfig): Promise<Response> {
+  const missing = missingPanelSetup(panel)
   if (missing) return json({ ok: false, error: `missing:${missing}`, keys: [], groups: {} }, 400)
-  const relay = relayFromSection(section)
+  const relay = relayFromPanel(panel)
   const [tokens, self, pricing] = await Promise.all([
     relay.listTokens(),
     relay.self().catch(() => null),
@@ -237,6 +261,7 @@ async function keysResponse(): Promise<Response> {
   }
   return json({
     ok: true,
+    panel: panel.id,
     account: self
       ? {
           username: self.username ?? String(self.id ?? ''),
@@ -246,39 +271,39 @@ async function keysResponse(): Promise<Response> {
     groups,
     groupRatios,
     keys: tokens.map((t) => keySummary(t, {
-      selectedName: section.selectedKeyName,
+      selectedName: panel.selectedKeyName,
       groupRatio: groupRatioOf(pricing, t.group || groupOf(self)),
     })),
   })
 }
 
 /** Apply a planned switch: credential write, route sync (with capability replay), metadata. */
-async function performSwitch(section: Section, idOrName: string, noModels: boolean): Promise<{ plan: SwitchPlan, warnings: string[] }> {
+async function performSwitch(panel: PanelConfig, idOrName: string, noModels: boolean): Promise<{ plan: SwitchPlan, warnings: string[] }> {
   if (!settingsService || !credentialsService) throw new Error('services unavailable')
-  const relay = relayFromSection(section)
-  const plan = await planSwitch({ relay, section, idOrName, noModels })
+  const relay = relayFromPanel(panel)
+  const plan = await planSwitch({ relay, idOrName, noModels })
   const warnings: string[] = []
   if (!plan.token.enabled) {
     warnings.push(`「${plan.token.name}」当前处于禁用状态，请求会被中转站拒绝；请先到中转站控制台启用它。`)
   }
-  await credentialsService.set(section.keyRef, plan.token.key)
+  await credentialsService.set(panel.keyRef, plan.token.key)
   // One guarded write carries the connection fields, the merged catalog, and
   // the capability fields derived from the knowledge base / overrides.
   if (plan.ids) {
     try {
-      await syncRouteCatalog(settingsService, section, plan.ids, resolvedKnowledge())
+      await syncRouteCatalog(settingsService, panel, plan.ids, knowledgeForPanel(resolvedKnowledge(), panel.id))
     } catch (err) {
       warnings.push(`模型列表写入被 llm-pi-ai 设置校验拒绝: ${err instanceof Error ? err.message : String(err)}`)
     }
   } else {
     try {
-      await ensureRouteProfile(settingsService, section)
+      await ensureRouteProfile(settingsService, panel)
     } catch {
       /* connection mirror is cosmetic */
     }
   }
   try {
-    await settingsService.update(NAMESPACE, { selectedKeyName: plan.token.name })
+    await settingsService.update(NAMESPACE, { panels: { [panel.id]: { selectedKeyName: plan.token.name } } })
   } catch {
     /* cosmetic only */
   }
@@ -295,11 +320,11 @@ function route(connection: { registerFetchRoute(owner: HostContext, spec: Record
   })
 }
 
-/** Build the per-model capability view the capability tab renders. */
-function capabilityModelsView(routeName: string) {
-  const profile = storedRouteProfile(settingsService!, routeName)
+/** Build the per-model capability view for one panel's route. */
+function capabilityModelsView(panel: PanelConfig) {
+  const profile = storedRouteProfile(settingsService!, panel.id)
   const entries = Array.isArray(profile?.models) ? profile!.models ?? [] : []
-  const knowledge = resolvedKnowledge()
+  const knowledge = knowledgeForPanel(resolvedKnowledge(), panel.id)
   return entries.map((entry) => {
     const derived = deriveCapabilityFor(String(entry.id), knowledge)
     return {
@@ -307,10 +332,107 @@ function capabilityModelsView(routeName: string) {
       input: derived.input ?? null,
       reasoning: derived.reasoning ?? null,
       contextWindow: derived.contextWindow ?? null,
+      maxTokens: derived.maxTokens ?? null,
       source: derived.source,
       catalogName: derived.catalogName ?? null,
     }
   })
+}
+
+
+/** The capabilities GET/POST shared response body. */
+function capabilitiesView() {
+  const knowledge = currentKnowledge()
+  const panels = currentPanels().map((panel) => {
+    const profile = storedRouteProfile(settingsService!, panel.id)
+    return {
+      id: panel.id,
+      configured: Boolean(profile),
+      route: panel.id,
+      routeDefaultInput: Array.isArray(profile?.defaultInput) ? profile!.defaultInput : ['text'],
+      models: capabilityModelsView(panel),
+    }
+  })
+  return {
+    ok: true,
+    configured: panels.some((panel) => panel.configured),
+    panels,
+    catalog: knowledge.capabilityCatalog,
+    overrides: knowledge.capabilityOverrides,
+    presets: runtimePreset ?? KNOWLEDGE_PRESET,
+  }
+}
+
+/** Per-panel list summary for the connection tab. */
+async function panelsResponse(): Promise<Response> {
+  const panels = currentPanels()
+  const summaries = await Promise.all(panels.map(async (panel) => {
+    const missing = missingPanelSetup(panel)
+    let account: { username: string, quotaCny: string } | null = null
+    if (!missing) {
+      try {
+        const self = await relayFromPanel(panel).self()
+        if (self) {
+          account = {
+            username: String(self.username ?? self.id ?? ''),
+            quotaCny: formatQuota(self.quota as number | undefined),
+          }
+        }
+      } catch {
+        /* the row shows the config state, not the account */
+      }
+    }
+    const models = storedRouteModelsCount(panel.id)
+    return {
+      id: panel.id,
+      baseUrl: panel.baseUrl,
+      host: panelHost(panel.baseUrl),
+      relayKind: panel.relayKind,
+      configured: missing === null,
+      missing,
+      tokenConfigured: Boolean(panel.accessToken),
+      userId: panel.userId > 0 ? panel.userId : null,
+      keyRef: panel.keyRef,
+      selectedKeyName: panel.selectedKeyName || '',
+      modelCount: models,
+      account,
+    }
+  }))
+  return json({ ok: true, panels: summaries })
+}
+
+function storedRouteModelsCount(route: string): number {
+  const profile = settingsService ? storedRouteProfile(settingsService, route) : undefined
+  return Array.isArray(profile?.models) ? profile!.models!.length : 0
+}
+
+/** Panel create/update/delete share one body shape and error mapping. */
+async function handlePanelsMutation(request: Request, action: 'create' | 'update' | 'delete'): Promise<Response> {
+  if (!settingsService) return json({ ok: false, error: 'settings service unavailable' }, 500)
+  const body = await readJson(request)
+  if (action === 'create') {
+    const panel = await createPanel(settingsService, body)
+    hostLogger?.info(`relay: panel ${panel.id} created`)
+    return json({ ok: true, panel: { id: panel.id, keyRef: panel.keyRef } })
+  }
+  if (action === 'update') {
+    const panel = await updatePanel(settingsService, body)
+    await mirrorPanelQuietly(panel)
+    return json({ ok: true, panel: { id: panel.id } })
+  }
+  const id = typeof body.panel === 'string' ? body.panel.trim() : ''
+  const result = await deletePanel(settingsService, credentialsService, id)
+  hostLogger?.info(`relay: panel ${id} deleted (route removed: ${result.routeRemoved})`)
+  return json({ ok: true, ...result })
+}
+
+async function mirrorPanelQuietly(panel: PanelConfig): Promise<void> {
+  if (!settingsService) return
+  try {
+    await ensureRouteProfile(settingsService, panel)
+  } catch {
+    /* connection mirror is cosmetic */
+  }
 }
 
 /**
@@ -339,29 +461,51 @@ export function apply(ctx: HostContext, config: Partial<PluginConfig> | undefine
     const connection = (services as unknown as { connection: { registerFetchRoute(owner: HostContext, spec: Record<string, unknown>): void } }).connection
 
     route(connection, ctx, 'state', ['GET'], async () => {
-      return json({ ok: true, state: await buildState(currentSection()) })
+      return json({ ok: true, state: buildState() })
     })
 
-    // API keys of the account with per-key metadata. The key material itself
-    // is never sent to the browser.
-    route(connection, ctx, 'keys', ['GET'], () => keysResponse())
+    // Panel list summaries for the connection tab.
+    route(connection, ctx, 'panels', ['GET'], () => panelsResponse())
+
+    route(connection, ctx, 'panels-create', ['POST'], (request) => handlePanelsMutation(request, 'create'))
+    route(connection, ctx, 'panels-update', ['POST'], (request) => handlePanelsMutation(request, 'update'))
+    route(connection, ctx, 'panels-delete', ['POST'], (request) => handlePanelsMutation(request, 'delete'))
+
+    // Connection test for one panel: GET /api/user/self with the saved
+    // settings, classified into the four failure shapes (§6).
+    route(connection, ctx, 'connection-test', ['POST'], async (request) => {
+      const body = await readJson(request)
+      const panel = resolvePanel(body.panel)
+      const missing = missingPanelSetup(panel)
+      if (missing) return json({ ok: false, error: `missing:${missing}` }, 400)
+      const result = await testPanelConnection(panel)
+      return json(result)
+    })
+
+    // API keys of one panel account with per-key metadata. The key material
+    // itself is never sent to the browser.
+    route(connection, ctx, 'keys', ['GET'], async (request) => {
+      const panel = resolvePanel(new URL(request.url).searchParams.get('panel'))
+      return keysResponse(panel)
+    })
 
     route(connection, ctx, 'use', ['POST'], async (request) => {
       const body = await readJson(request)
       const idOrName = typeof body.idOrName === 'string' ? body.idOrName : ''
       if (!idOrName) return json({ ok: false, error: 'idOrName is required' }, 400)
-      const section = currentSection()
-      const missing = missingSetup(section)
+      const panel = resolvePanel(body.panel)
+      const missing = missingPanelSetup(panel)
       if (missing) return json({ ok: false, error: `missing:${missing}` }, 400)
       let result
       try {
-        result = await performSwitch(section, idOrName, body.noModels === true)
+        result = await performSwitch(panel, idOrName, body.noModels === true)
       } catch (err) {
         const status = (err as { code?: string }).code === 'KEY_NOT_FOUND' ? 404 : 502
         return json({ ok: false, error: err instanceof Error ? err.message : String(err) }, status)
       }
       return json({
         ok: true,
+        panel: panel.id,
         key: { id: result.plan.token.id, name: result.plan.token.name, enabled: result.plan.token.enabled },
         modelCount: result.plan.ids?.length ?? 0,
         warnings: result.warnings,
@@ -371,14 +515,14 @@ export function apply(ctx: HostContext, config: Partial<PluginConfig> | undefine
     // The active key's callable models with pricing. Also republishes the
     // model list into the dsh route config (hot-reloads running sessions),
     // with the capability rules from the knowledge base applied.
-    route(connection, ctx, 'models', ['GET'], async () => {
-      const section = currentSection()
-      const missing = missingSetup(section)
+    route(connection, ctx, 'models', ['GET'], async (request) => {
+      const panel = resolvePanel(new URL(request.url).searchParams.get('panel'))
+      const missing = missingPanelSetup(panel)
       if (missing) return json({ ok: false, error: `missing:${missing}`, models: [] }, 400)
       if (!settingsService) return json({ ok: false, error: 'settings service unavailable' }, 500)
-      const credentialValue = await activeCredential(section.keyRef)
+      const credentialValue = await activeCredential(panel.keyRef)
       if (!credentialValue) return json({ ok: false, error: 'no-active-key', models: [] }, 400)
-      const relay = relayFromSection(section)
+      const relay = relayFromPanel(panel)
       let ids: string[]
       try {
         ids = await relay.keyModels(credentialValue)
@@ -400,12 +544,13 @@ export function apply(ctx: HostContext, config: Partial<PluginConfig> | undefine
       }))
       let catalogWarning: string | undefined
       try {
-        await syncRouteCatalog(settingsService, section, ids, resolvedKnowledge())
+        await syncRouteCatalog(settingsService, panel, ids, knowledgeForPanel(resolvedKnowledge(), panel.id))
       } catch (err) {
         catalogWarning = err instanceof Error ? err.message : String(err)
       }
       return json({
         ok: true,
+        panel: panel.id,
         source: '/v1/models',
         group: groupOf(self) || null,
         groupRatio,
@@ -414,62 +559,46 @@ export function apply(ctx: HostContext, config: Partial<PluginConfig> | undefine
       })
     })
 
-    // Capability Tab: the knowledge base plus per-id overrides live in the
-    // relay namespace; the route entries carry only the derived result. GET
-    // returns both dicts, the preset layer, and the derived per-model view;
-    // POST applies directed ops (set/delete per name/id) and replays the
-    // derivation over the route in one guarded write.
+    // Capability Tab: the knowledge base plus per-panel per-id overrides live
+    // in the relay namespace; the route entries carry only the derived
+    // result. GET returns both dicts, the preset layer, and the derived
+    // per-panel per-model view; POST applies directed ops (set/delete per
+    // name/id, overrides addressed to their panel) and replays the
+    // derivation over every configured route in one guarded write each.
     route(connection, ctx, 'capabilities', ['GET', 'POST'], async (request) => {
       if (!settingsService) return json({ ok: false, error: 'settings service unavailable' }, 500)
-      const section = currentSection()
-      if (request.method === 'GET') {
-        const knowledge = currentKnowledge()
-        const profile = storedRouteProfile(settingsService, section.route)
-        return json({
-          ok: true,
-          configured: Boolean(profile),
-          route: section.route,
-          routeDefaultInput: Array.isArray(profile?.defaultInput) ? profile!.defaultInput : ['text'],
-          catalog: knowledge.capabilityCatalog,
-          overrides: knowledge.capabilityOverrides,
-          presets: runtimePreset ?? KNOWLEDGE_PRESET,
-          models: capabilityModelsView(section.route),
-        })
-      }
+      if (request.method === 'GET') return json(capabilitiesView())
       const body = await readJson(request)
       try {
-        await applyCapabilityOps(settingsService, section.route, body as Record<string, unknown>, resolvedKnowledge)
-        return json({ ok: true, models: capabilityModelsView(section.route) })
+        await applyCapabilityOps(settingsService, body as Record<string, unknown>, resolvedKnowledge, currentPanels())
+        return json(capabilitiesView())
       } catch (err) {
         return json({ ok: false, error: err instanceof Error ? err.message : String(err) }, 400)
       }
     })
 
     // 刷新预置: force-fetch models.dev (bypassing the TTL cache), rebuild the
-    // preset layer with the same union logic as `npm run preset:fetch` — the
-    // panel source comes from the public /api/pricing when a connection is
-    // configured — and hold it in host memory until restart.
+    // preset layer with the same mainstream rules as `npm run preset:fetch`,
+    // hold it in host memory until restart, and replay the derivation over
+    // every configured panel route (the v0.5.1 gap: the replay used to wait
+    // for the next key switch / sync / save).
     route(connection, ctx, 'knowledge-refresh', ['POST'], async () => {
-      let doc: ModelsDevDocument
+      let result
       try {
-        doc = await modelsDev.refresh()
+        result = await refreshPresetAndReplay({
+          fetchDoc: () => modelsDev.refresh(),
+          settings: settingsService!,
+          panels: currentPanels(),
+          onPreset: (entries) => {
+            runtimePreset = entries
+            hostLogger?.info(`relay: knowledge preset refreshed (${Object.keys(entries).length} entries)`)
+          },
+          knowledge: resolvedKnowledge,
+        })
       } catch (err) {
         return json({ ok: false, error: `models.dev 获取失败: ${err instanceof Error ? err.message : String(err)}` }, 502)
       }
-      let panelModels: string[] | null = null
-      try {
-        const section = currentSection()
-        if (!missingSetup(section)) {
-          const pricing = await relayFromSection(section).pricing()
-          panelModels = pricing ? [...pricing.byModel.keys()] : null
-        }
-      } catch {
-        /* no panel connection right now — whitelist-only rebuild */
-      }
-      const built = buildPresetEntries(panelModels, doc)
-      runtimePreset = built.entries
-      hostLogger?.info(`relay: knowledge preset refreshed (${Object.keys(built.entries).length} entries)`)
-      return json({ ok: true, count: Object.keys(built.entries).length, dropped: built.dropped.length })
+      return json({ ok: true, ...result })
     })
 
     // ↻ models.dev reference values for one model name (knowledge base default).
@@ -480,7 +609,7 @@ export function apply(ctx: HostContext, config: Partial<PluginConfig> | undefine
       return json({ ok: true, model: modelId, suggestion })
     })
 
-    // Create a key on the panel. The panel-generated secret is stripped in
+    // Create a key on one panel. The panel-generated secret is stripped in
     // relay.createToken — it never reaches this response. setAsActive runs
     // the regular switch flow server-side (secret only enters the credential
     // store).
@@ -505,16 +634,16 @@ export function apply(ctx: HostContext, config: Partial<PluginConfig> | undefine
           return json({ ok: false, error: '有效期非法' }, 400)
         }
       }
-      const section = currentSection()
-      const missing = missingSetup(section)
+      const panel = resolvePanel(body.panel)
+      const missing = missingPanelSetup(panel)
       if (missing) return json({ ok: false, error: `missing:${missing}` }, 400)
-      const relay = relayFromSection(section)
+      const relay = relayFromPanel(panel)
       const created = await relay.createToken({ name, group, unlimitedQuota, remainQuota, expiredTime })
       const warnings: string[] = []
       let switched = false
       if (body.setAsActive === true) {
         try {
-          const result = await performSwitch(section, String(created.id), false)
+          const result = await performSwitch(panel, String(created.id), false)
           switched = true
           warnings.push(...result.warnings)
         } catch (err) {
@@ -530,10 +659,10 @@ export function apply(ctx: HostContext, config: Partial<PluginConfig> | undefine
       const body = await readJson(request)
       const id = body.id
       if (id === undefined || id === null || id === '') return json({ ok: false, error: '缺少 key id' }, 400)
-      const section = currentSection()
-      const missing = missingSetup(section)
+      const panel = resolvePanel(body.panel)
+      const missing = missingPanelSetup(panel)
       if (missing) return json({ ok: false, error: `missing:${missing}` }, 400)
-      const relay = relayFromSection(section)
+      const relay = relayFromPanel(panel)
       const records = await relay.listTokensRaw()
       const record = records.find((r) => String(r.id) === String(id))
       if (!record) return json({ ok: false, error: `找不到编号为「${String(id)}」的 key` }, 404)
@@ -579,15 +708,15 @@ export function apply(ctx: HostContext, config: Partial<PluginConfig> | undefine
     })
 
     // Delete one key. Response carries active:true when the deleted key was
-    // the currently active one, so the client can warn (two-step confirm).
+    // the currently active one, so the client can warn (Modal confirm).
     route(connection, ctx, 'keys-delete', ['POST'], async (request) => {
       const body = await readJson(request)
       const id = body.id
       if (id === undefined || id === null || id === '') return json({ ok: false, error: '缺少 key id' }, 400)
-      const section = currentSection()
-      const missing = missingSetup(section)
+      const panel = resolvePanel(body.panel)
+      const missing = missingPanelSetup(panel)
       if (missing) return json({ ok: false, error: `missing:${missing}` }, 400)
-      const relay = relayFromSection(section)
+      const relay = relayFromPanel(panel)
       let name = ''
       try {
         const tokens = await relay.listTokens()
@@ -596,19 +725,19 @@ export function apply(ctx: HostContext, config: Partial<PluginConfig> | undefine
         /* the delete attempt below surfaces real errors */
       }
       await relay.deleteToken(id as number | string)
-      return json({ ok: true, active: name !== '' && name === section.selectedKeyName })
+      return json({ ok: true, active: name !== '' && name === panel.selectedKeyName })
     })
 
     // Dashboard: account cards plus per-day per-model usage buckets (¥ done
     // server-side). Panels keep only recent buckets — sparse/empty is normal.
     route(connection, ctx, 'dashboard', ['GET'], async (request) => {
-      const section = currentSection()
-      const missing = missingSetup(section)
+      const panel = resolvePanel(new URL(request.url).searchParams.get('panel'))
+      const missing = missingPanelSetup(panel)
       if (missing) return json({ ok: false, error: `missing:${missing}` }, 400)
       const daysParam = Number(new URL(request.url).searchParams.get('days') ?? 7)
       const days = Number.isInteger(daysParam) && daysParam >= 1 && daysParam <= 30 ? daysParam : 7
       const nowSeconds = Math.floor(Date.now() / 1000)
-      const relay = relayFromSection(section)
+      const relay = relayFromPanel(panel)
       let self: Record<string, unknown> | null
       try {
         self = await relay.self()
@@ -641,8 +770,8 @@ export function apply(ctx: HostContext, config: Partial<PluginConfig> | undefine
     // Usage logs: one page of the panel's log list, shaped for the table
     // (`other` pre-parsed into a first-response-time field).
     route(connection, ctx, 'logs', ['GET'], async (request) => {
-      const section = currentSection()
-      const missing = missingSetup(section)
+      const panel = resolvePanel(new URL(request.url).searchParams.get('panel'))
+      const missing = missingPanelSetup(panel)
       if (missing) return json({ ok: false, error: `missing:${missing}`, logs: [] }, 400)
       const params = new URL(request.url).searchParams
       const numberParam = (key: string): number | undefined => {
@@ -655,7 +784,7 @@ export function apply(ctx: HostContext, config: Partial<PluginConfig> | undefine
         const raw = params.get(key)
         return raw ? raw : undefined
       }
-      const relay = relayFromSection(section)
+      const relay = relayFromPanel(panel)
       const page = await relay.logs({
         p: numberParam('p') ?? 1,
         pageSize: numberParam('pageSize') ?? 10,
@@ -676,8 +805,8 @@ export function apply(ctx: HostContext, config: Partial<PluginConfig> | undefine
 
     // Page-header statistics over the current filter window.
     route(connection, ctx, 'logs-stat', ['GET'], async (request) => {
-      const section = currentSection()
-      const missing = missingSetup(section)
+      const panel = resolvePanel(new URL(request.url).searchParams.get('panel'))
+      const missing = missingPanelSetup(panel)
       if (missing) return json({ ok: false, error: `missing:${missing}` }, 400)
       const params = new URL(request.url).searchParams
       const numberParam = (key: string): number | undefined => {
@@ -686,17 +815,17 @@ export function apply(ctx: HostContext, config: Partial<PluginConfig> | undefine
         const n = Number(raw)
         return Number.isFinite(n) ? n : undefined
       }
-      const relay = relayFromSection(section)
+      const relay = relayFromPanel(panel)
       const stat = await relay.logStat(numberParam('start'), numberParam('end'))
       return json({ ok: true, stat: { quota: stat.quota, quotaCny: formatQuota(stat.quota), rpm: stat.rpm, tpm: stat.tpm } })
     })
 
     // Filter dropdown sources: account-visible model ids and usable groups.
-    route(connection, ctx, 'logs-meta', ['GET'], async () => {
-      const section = currentSection()
-      const missing = missingSetup(section)
+    route(connection, ctx, 'logs-meta', ['GET'], async (request) => {
+      const panel = resolvePanel(new URL(request.url).searchParams.get('panel'))
+      const missing = missingPanelSetup(panel)
       if (missing) return json({ ok: false, error: `missing:${missing}`, models: [], groups: {} }, 400)
-      const relay = relayFromSection(section)
+      const relay = relayFromPanel(panel)
       let models: string[] = []
       try {
         models = await relay.userModels()

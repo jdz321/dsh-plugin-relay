@@ -9,17 +9,18 @@
  * concurrent writer's fields (settings update merges objects but REPLACES
  * arrays).
  *
+ * Since v0.6.0 every panel is its own route: the route key is the panel id.
  * Capability config on the models entries (`input`, `reasoningEfforts`,
- * `contextWindow`) is derived state since v0.5.0: its persistent sources are
- * the plugin's knowledge base and per-id overrides (see knowledge.ts), and
- * every catalog sync or capability save replays those sources over the
- * entries. Entries no plugin config covers are left untouched, so manual
- * edits from the official Models page survive.
+ * `contextWindow`, `maxTokens`) is derived state: its persistent sources are
+ * the plugin's knowledge base and the panel's per-id overrides (see
+ * knowledge.ts), and every catalog sync or capability save replays those
+ * sources over the entries. Entries no plugin config covers are left
+ * untouched, so manual edits from the official Models page survive.
  */
 
 import { cleanModelEntry, mergeCatalog } from './catalog.js'
-import { applyDerivedCapabilities, type KnowledgeConfig } from './knowledge.js'
-import { routeProfileFields, type Section } from './plan.js'
+import { applyDerivedCapabilities, type KnowledgeView } from './knowledge.js'
+import { routeProfileFieldsFor, type PanelConfig } from './panels.js'
 import type { PiAiSection, RouteModelEntry, RouteProfile, SettingsConflictError, SettingsPathOp, SettingsService } from './types.js'
 
 /** How often a revision-guarded write retries after losing a race. */
@@ -53,7 +54,7 @@ export function isSettingsConflict(err: unknown): err is SettingsConflictError {
  * path ops from it, and write with a revision guard, retrying the whole
  * read-build-write cycle while the guard reports a lost race.
  */
-async function guardedMutate(
+export async function guardedMutate(
   settings: SettingsService,
   build: (section: PiAiSection) => SettingsPathOp[],
 ): Promise<void> {
@@ -80,19 +81,20 @@ async function guardedMutate(
  * the knowledge base / override rules replay over the result. Creates the
  * route (with its connection-derived profile fields) when absent.
  */
-export async function syncRouteCatalog(settings: SettingsService, section: Section, ids: readonly string[], knowledge: KnowledgeConfig = { capabilityCatalog: {}, capabilityOverrides: {} }): Promise<{ models: RouteModelEntry[], written: boolean }> {
-  const profileFields = routeProfileFields(section)
-  if (!storedRouteProfile(settings, section.route)) {
+export async function syncRouteCatalog(settings: SettingsService, panel: PanelConfig, ids: readonly string[], knowledge: KnowledgeView = { capabilityCatalog: {}, capabilityOverrides: {} }): Promise<{ models: RouteModelEntry[], written: boolean }> {
+  const profileFields = routeProfileFieldsFor(panel)
+  const route = panel.id
+  if (!storedRouteProfile(settings, route)) {
     const models = applyDerivedCapabilities(mergeCatalog(ids, undefined), knowledge).map(cleanModelEntry)
     // Create path: a plain update suffices — there is nothing to clobber.
     await settings.update('llm-pi-ai', {
-      providers: { [section.route]: { ...profileFields, models } },
+      providers: { [route]: { ...profileFields, displayName: route, models } },
     })
     return { models, written: true }
   }
   let wrote = false
   await guardedMutate(settings, (current) => {
-    const profile = current.providers?.[section.route]
+    const profile = current.providers?.[route]
     const stored = profile?.models ?? []
     // stored entries come from the RESOLVED value: schemastery materializes
     // `input: []` shells that must be stripped before they are written back.
@@ -106,13 +108,13 @@ export async function syncRouteCatalog(settings: SettingsService, section: Secti
     wrote = true
     const ops: SettingsPathOp[] = staleFields.map((key) => ({
       op: 'set',
-      path: ['providers', section.route, key],
+      path: ['providers', route, key],
       value: profileFields[key],
     }))
-    if (!unchanged) ops.push({ op: 'set', path: ['providers', section.route, 'models'], value: models })
+    if (!unchanged) ops.push({ op: 'set', path: ['providers', route, 'models'], value: models })
     return ops
   })
-  return { models: storedRouteModels(settings, section.route), written: wrote }
+  return { models: storedRouteModels(settings, route), written: wrote }
 }
 
 /**
@@ -120,7 +122,7 @@ export async function syncRouteCatalog(settings: SettingsService, section: Secti
  * after the plugin's capability config changed. A revision-guarded no-op
  * write when nothing derives differently.
  */
-export async function replayRouteCapabilities(settings: SettingsService, route: string, knowledge: KnowledgeConfig): Promise<RouteModelEntry[]> {
+export async function replayRouteCapabilities(settings: SettingsService, route: string, knowledge: KnowledgeView): Promise<RouteModelEntry[]> {
   if (!storedRouteProfile(settings, route)) return []
   await guardedMutate(settings, (current) => {
     const stored = current.providers?.[route]?.models ?? []
@@ -133,18 +135,33 @@ export async function replayRouteCapabilities(settings: SettingsService, route: 
 }
 
 /**
- * Make an existing route follow the connection settings (baseURL etc.).
- * Never creates the route — without models a custom route cannot pass pi-ai's
- * strict validation, so creation is syncRouteCatalog's job on first key use.
+ * Make an existing route follow the panel's connection settings (baseURL
+ * etc.). Never creates the route — without models a custom route cannot pass
+ * pi-ai's strict validation, so creation is syncRouteCatalog's job on first
+ * key use.
  */
-export async function ensureRouteProfile(settings: SettingsService, section: Section): Promise<boolean> {
-  const profile = storedRouteProfile(settings, section.route)
+export async function ensureRouteProfile(settings: SettingsService, panel: PanelConfig): Promise<boolean> {
+  const route = panel.id
+  const profile = storedRouteProfile(settings, route)
   if (!profile) return false
-  const fields = routeProfileFields(section)
+  const fields = routeProfileFieldsFor(panel)
   const stale = CONNECTION_FIELDS.filter((key) => profile[key] !== undefined && profile[key] !== fields[key])
   if (!stale.length) return false
   await settings.update('llm-pi-ai', {
-    providers: { [section.route]: Object.fromEntries(stale.map((key) => [key, fields[key]])) },
+    providers: { [route]: Object.fromEntries(stale.map((key) => [key, fields[key]])) },
+  })
+  return true
+}
+
+/**
+ * Remove one panel's route entirely (panel deletion). Revision-guarded like
+ * every other models-array writer; a no-op when the route is already gone.
+ */
+export async function unsetRoute(settings: SettingsService, route: string): Promise<boolean> {
+  if (!storedRouteProfile(settings, route)) return false
+  await guardedMutate(settings, (current) => {
+    if (!current.providers?.[route]) return []
+    return [{ op: 'unset', path: ['providers', route] }]
   })
   return true
 }

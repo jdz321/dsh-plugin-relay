@@ -73,6 +73,8 @@ export interface CredentialResolution {
 export interface CredentialsService {
   resolve(ref: string): Promise<CredentialResolution | null | undefined>
   set(ref: string, value: string): Promise<void>
+  /** Remove a reference; absent is a no-op, env-shadowed refs reject. */
+  unset?(ref: string): Promise<void>
 }
 
 /** A stored models entry of a pi-ai provider profile (sparse shape). */

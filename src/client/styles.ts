@@ -76,8 +76,14 @@ export const cssText = `
 .${CSS_PREFIX}_dashChart{border:.5px solid var(--dsw-alias-border-l4);border-radius:10px;flex-direction:column;gap:8px;padding:10px 12px;display:flex}
 .${CSS_PREFIX}_dashChartHead{align-items:center;justify-content:space-between;gap:8px;display:flex}
 .${CSS_PREFIX}_chart{width:100%;font-size:11px}
-.${CSS_PREFIX}_chart .recharts-text{fill:var(--dsw-alias-label-tertiary);font-size:10px}
-.${CSS_PREFIX}_chart .recharts-default-legend{font-size:11px}
+.${CSS_PREFIX}_chart svg{display:block}
+.${CSS_PREFIX}_chartGrid{stroke:var(--dsw-alias-border-l4);stroke-dasharray:3 3}
+.${CSS_PREFIX}_chartText{fill:var(--dsw-alias-label-tertiary);font-size:10px}
+.${CSS_PREFIX}_chartBar:hover{opacity:.85}
+.${CSS_PREFIX}_chartLegend{flex-wrap:wrap;gap:4px 10px;display:flex}
+.${CSS_PREFIX}_chartLegendItem{font:inherit;font-size:11px;color:var(--dsw-alias-label-secondary);background:none;border:none;cursor:pointer;align-items:center;gap:5px;display:inline-flex;padding:2px 0;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.${CSS_PREFIX}_chartLegendOff{color:var(--dsw-alias-label-dimmed);text-decoration:line-through}
+.${CSS_PREFIX}_chartSwatch{width:10px;height:10px;border-radius:3px;flex:none}
 @media (max-width:480px){
   .${CSS_PREFIX}_dashCards{grid-template-columns:repeat(2,minmax(0,1fr))}
 }
@@ -135,4 +141,17 @@ export const cssText = `
 .${CSS_PREFIX}_presetToolbar{align-items:center;gap:8px;display:flex;min-width:0}
 .${CSS_PREFIX}_presetFilter{height:28px;font-size:12px;flex:1 1 auto;min-width:0}
 .${CSS_PREFIX}_presetToolbar button{flex:none}
+
+/* Panel detail page: back + name + status + test bar. */
+.${CSS_PREFIX}_detailHead{align-items:center;gap:8px;display:flex}
+.${CSS_PREFIX}_detailTitle{color:var(--dsw-alias-label-primary);font-size:14px;font-weight:600;overflow-wrap:anywhere}
+.${CSS_PREFIX}_detailHead .${CSS_PREFIX}_formActions{margin-left:auto}
+.${CSS_PREFIX}_panelRow{cursor:default}
+.${CSS_PREFIX}_panelMain{font:inherit;text-align:left;background:none;border:none;color:inherit;padding:0;flex-direction:column;gap:2px;min-width:0;flex:1 1 0;display:flex;cursor:pointer}
+.${CSS_PREFIX}_panelMain:hover .${CSS_PREFIX}_keyName{color:var(--dsw-alias-brand-primary)}
+
+/* Capability tab: per-panel platform groups. */
+.${CSS_PREFIX}_capPanelGroup{flex-direction:column;gap:6px;display:flex}
+.${CSS_PREFIX}_capPanelHead{align-items:baseline;gap:8px;flex-wrap:wrap;display:flex;margin-top:4px}
+.${CSS_PREFIX}_capPanelName{color:var(--dsw-alias-label-primary);font-size:13px;font-weight:600}
 `

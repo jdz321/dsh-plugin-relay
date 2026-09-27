@@ -1,5 +1,5 @@
 /**
- * The 「模型能力」 tab, v0.5.1 shape — every card commits itself, there is no
+ * The 「模型能力」 tab, v0.6.0 shape — every card commits itself, there is no
  * global save button, and ALL THREE sections edit in place the way the
  * official Models page does: one row expands into an editor card, one card
  * open across the whole page (`openCard`), Apply/Done writes immediately and
@@ -9,28 +9,31 @@
  *
  *  - 我的条目: user knowledge entries (namespace `capabilityCatalog`); 新增
  *    opens the editor as a create card on top of the list.
- *  - 预置条目: the preset layer (compiled-in baseline, rebuilt in host memory
- *    by the single 刷新预置 button INSIDE the collapsed panel) in a
- *    <details> with a name filter; Edit expands the row in place and Done
- *    saves the copy as a custom entry (which then overrides the preset).
- *  - 平台模型: one collapsed row per route-catalog id showing the derived
- *    config with a source badge; the matched knowledge-base name renders
- *    under the id. Edit expands the row in place; Done saves that id's
- *    override (overrideSet, or overrideDelete when the draft is blank);
- *    Clear override confirms in a Modal.
+ *  - 预置条目: the preset layer (compiled-in mainstream baseline, rebuilt in
+ *    host memory by the single 刷新预置 button INSIDE the collapsed panel —
+ *    the refresh also replays into every configured route) in a <details>
+ *    with a name filter; Edit expands the row in place and Done saves the
+ *    copy as a custom entry (which then overrides the preset).
+ *  - 平台模型: grouped BY PANEL — one subsection per panel route showing the
+ *    derived config with a source badge and a coverage indicator; the matched
+ *    knowledge-base name renders under the id. Edit expands the row in place;
+ *    Done saves that id's override for THAT panel (overrideSet + panel, or
+ *    overrideDelete + panel when the draft is blank); Clear override
+ *    confirms in a Modal.
  */
 
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { Button, IconChevronDownOutline14, Modal, Pill, Switch, Tag } from '@deepseek-ai/dsh-client-ui-primitives'
 
-import { EFFORT_LEVELS, MODALITIES } from '../constants.js'
-import { apiPost } from './api.js'
+import { EFFORT_LEVELS, MAX_TOKENS_MAX, MODALITIES } from '../constants.js'
+import { apiGet, apiPost } from './api.js'
 import {
   contextWindowHint,
   draftFromEntry,
   draftFromView,
   entryFromDraft,
   entrySummary,
+  maxTokensHint,
   type CapDictEntry,
   type CapabilityDraft,
 } from './capability-draft.js'
@@ -43,25 +46,34 @@ export interface CapEntryView {
   input: string[] | null
   reasoning: false | string[] | null
   contextWindow: number | null
+  maxTokens: number | null
   source: 'override' | 'catalog' | 'catalog-approximate' | 'preset' | 'preset-approximate' | null
   catalogName: string | null
 }
 
-/** One model row from GET /api/relay/models (price carries the vendor). */
-export interface ModelRow {
+/** One panel's route-catalog view (the platform section groups by this). */
+export interface CapPanelView {
   id: string
-  price?: PriceView | null
+  configured: boolean
+  route: string
+  routeDefaultInput?: string[]
+  models?: CapEntryView[]
 }
 
 export interface CapData {
   ok: boolean
   error?: string
   configured?: boolean
-  routeDefaultInput?: string[]
+  panels?: CapPanelView[]
   catalog?: Record<string, CapDictEntry>
-  overrides?: Record<string, CapDictEntry>
+  overrides?: Record<string, Record<string, CapDictEntry>>
   presets?: Record<string, CapDictEntry>
-  models?: CapEntryView[]
+}
+
+/** One model row from GET /api/relay/models (price carries the vendor). */
+export interface ModelRow {
+  id: string
+  price?: PriceView | null
 }
 
 export interface ModelsData {
@@ -73,7 +85,6 @@ export interface ModelsData {
 export interface CapabilitiesViewProps {
   t: Translator
   caps: CapData | null
-  models: ModelsData | null
   refreshCaps: () => void
   onMessage: (message: { ok: boolean, text: string } | null) => void
 }
@@ -83,20 +94,38 @@ interface OpenCard {
   section: 'kb' | 'preset' | 'platform'
   /** My-entry name (kb), preset name, or platform model id. '' = kb create. */
   key: string
+  /** Owning panel for platform cards. */
+  panel?: string
 }
 
-/** Localize the two client-side draft errors. */
+/** Localize the client-side draft errors. */
 function draftErrorText(err: unknown, t: Translator): string {
   const text = err instanceof Error ? err.message : String(err)
-  return text === 'levels-required' ? t('capLevelsRequired') : text === 'context-invalid' ? t('capContextInvalid') : text
+  return text === 'levels-required' ? t('capLevelsRequired')
+    : text === 'context-invalid' ? t('capContextInvalid')
+    : text === 'max-tokens-invalid' ? t('capMaxTokensInvalid')
+    : text
 }
 
-export function CapabilitiesView({ t, caps, models, refreshCaps, onMessage }: CapabilitiesViewProps): JSX.Element {
+/** Coverage counts of one panel's derived models, by source bucket. */
+export function coverageCounts(models: readonly CapEntryView[]): { total: number, preset: number, catalog: number, override: number, none: number } {
+  const counts = { total: models.length, preset: 0, catalog: 0, override: 0, none: 0 }
+  for (const model of models) {
+    if (model.source === 'override') counts.override += 1
+    else if (model.source === 'catalog' || model.source === 'catalog-approximate') counts.catalog += 1
+    else if (model.source === 'preset' || model.source === 'preset-approximate') counts.preset += 1
+    else counts.none += 1
+  }
+  return counts
+}
+
+export function CapabilitiesView({ t, caps, refreshCaps, onMessage }: CapabilitiesViewProps): JSX.Element {
   const [openCard, setOpenCard] = useState<OpenCard | null>(null)
   const [kbDelete, setKbDelete] = useState<string | null>(null)
-  const [overrideClear, setOverrideClear] = useState<string | null>(null)
+  const [overrideClear, setOverrideClear] = useState<{ panel: string, id: string } | null>(null)
   const [presetFilter, setPresetFilter] = useState('')
   const [refreshBusy, setRefreshBusy] = useState(false)
+  const [vendors, setVendors] = useState<Record<string, Record<string, string>>>({})
 
   const catalogEntries = useMemo(() => Object.entries(caps?.catalog ?? {}).sort(([a], [b]) => a.localeCompare(b)), [caps])
   const presetEntries = useMemo(() => Object.entries(caps?.presets ?? {}).sort(([a], [b]) => a.localeCompare(b)), [caps])
@@ -106,10 +135,39 @@ export function CapabilitiesView({ t, caps, models, refreshCaps, onMessage }: Ca
     return presetEntries.filter(([name]) => name.toLowerCase().includes(needle))
   }, [presetEntries, presetFilter])
 
-  const vendorOf = (id: string): string | null => {
-    const row = models?.ok && models.models ? models.models.find((m) => m.id === id) : undefined
-    return row?.price?.vendor ?? null
-  }
+  const panelViews = caps?.panels ?? []
+  const panelIds = panelViews.map((panel) => panel.id).join(',')
+
+  // Vendor badges come from the per-panel pricing; fetch each panel's model
+  // list once per panel-set change (the same call the models tab makes).
+  useEffect(() => {
+    const ids = panelIds ? panelIds.split(',') : []
+    let cancelled = false
+    void (async () => {
+      const next: Record<string, Record<string, string>> = {}
+      await Promise.all(ids.map(async (panelId) => {
+        try {
+          const body = await apiGet(`/api/relay/models?panel=${encodeURIComponent(panelId)}`)
+          const data = body as unknown as ModelsData
+          const map: Record<string, string> = {}
+          if (data.ok) {
+            for (const row of data.models ?? []) {
+              if (row.price?.vendor) map[row.id] = row.price.vendor
+            }
+          }
+          next[panelId] = map
+        } catch {
+          next[panelId] = {}
+        }
+      }))
+      if (!cancelled) setVendors(next)
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [panelIds])
+
+  const vendorOf = (panelId: string, id: string): string | null => vendors[panelId]?.[id] ?? null
 
   /** Directed-op POST; resolves {ok:false,error} instead of throwing. */
   const postOps = async (ops: Record<string, unknown>): Promise<{ ok: boolean, error?: string }> => {
@@ -144,14 +202,17 @@ export function CapabilitiesView({ t, caps, models, refreshCaps, onMessage }: Ca
     return result
   }
 
-  const submitPlatformCard = async (id: string, draft: CapabilityDraft): Promise<{ ok: boolean, error?: string }> => {
+  const submitPlatformCard = async (panelId: string, id: string, draft: CapabilityDraft): Promise<{ ok: boolean, error?: string }> => {
     let entry: CapDictEntry | undefined
     try {
       entry = entryFromDraft(draft)
     } catch (err) {
       return { ok: false, error: draftErrorText(err, t) }
     }
-    const result = await postOps(entry ? { overrideSet: { [id]: entry } } : { overrideDelete: [id] })
+    const ops: Record<string, unknown> = { panel: panelId }
+    if (entry) ops.overrideSet = { [id]: entry }
+    else ops.overrideDelete = [id]
+    const result = await postOps(ops)
     if (result.ok) onMessage({ ok: true, text: t('capSavedOk') })
     return result
   }
@@ -166,13 +227,13 @@ export function CapabilitiesView({ t, caps, models, refreshCaps, onMessage }: Ca
   }
 
   const clearOverride = async (): Promise<void> => {
-    const id = overrideClear
-    if (id === null) return
-    const result = await postOps({ overrideDelete: [id] })
+    const target = overrideClear
+    if (target === null) return
+    const result = await postOps({ panel: target.panel, overrideDelete: [target.id] })
     setOverrideClear(null)
-    if (openCard?.section === 'platform' && openCard.key === id) setOpenCard(null)
+    if (openCard?.section === 'platform' && openCard.key === target.id && openCard.panel === target.panel) setOpenCard(null)
     onMessage(result.ok
-      ? { ok: true, text: t('capOverrideCleared')(id) }
+      ? { ok: true, text: t('capOverrideCleared')(target.id) }
       : { ok: false, text: t('actionFail')(String(result.error ?? '?')) })
   }
 
@@ -180,8 +241,11 @@ export function CapabilitiesView({ t, caps, models, refreshCaps, onMessage }: Ca
     setRefreshBusy(true)
     try {
       const body = await apiPost('/api/relay/knowledge-refresh', {})
-      if (body.ok) {
-        onMessage({ ok: true, text: t('capPresetRefreshed')(Number(body.count ?? 0)) })
+      if (body.ok && body.replayed !== false) {
+        onMessage({ ok: true, text: t('capPresetRefreshedSynced')(Number(body.count ?? 0)) })
+        refreshCaps()
+      } else if (body.ok) {
+        onMessage({ ok: false, text: t('capPresetReplayFail')(String(body.replayError ?? '?')) })
         refreshCaps()
       } else {
         onMessage({ ok: false, text: t('capPresetRefreshFail')(String(body.error ?? '?')) })
@@ -202,9 +266,9 @@ export function CapabilitiesView({ t, caps, models, refreshCaps, onMessage }: Ca
     return <Tag tone="neutral">{t('capSourceNone')}</Tag>
   }
 
-  const open = (section: OpenCard['section'], key: string): void => setOpenCard({ section, key })
-  const isOpen = (section: OpenCard['section'], key: string): boolean =>
-    openCard !== null && openCard.section === section && openCard.key === key
+  const open = (section: OpenCard['section'], key: string, panel?: string): void => setOpenCard({ section, key, panel })
+  const isOpen = (section: OpenCard['section'], key: string, panel?: string): boolean =>
+    openCard !== null && openCard.section === section && openCard.key === key && openCard.panel === panel
 
   return (
     <div className="relay_tabPane">
@@ -310,44 +374,60 @@ export function CapabilitiesView({ t, caps, models, refreshCaps, onMessage }: Ca
             <div className="relay_capSection">
               <div className="relay_capSectionTitle">{t('capPlatformTitle')}</div>
               <p className="relay_metaLine">{t('capPlatformIntro')}</p>
-              {!caps.configured || (caps.models ?? []).length === 0 ? <div className="relay_empty">{t('capNotConfigured')}</div>
-                : (caps.models ?? []).map((view) => {
-                  if (isOpen('platform', view.id)) {
-                    return (
-                      <PlatformCard
-                        key={`edit:${view.id}`}
-                        view={view}
-                        override={caps.overrides?.[view.id]}
-                        vendor={vendorOf(view.id)}
-                        routeDefault={caps.routeDefaultInput ?? ['text']}
-                        t={t}
-                        submit={(draft) => submitPlatformCard(view.id, draft)}
-                        onClear={() => setOverrideClear(view.id)}
-                        onClose={() => setOpenCard(null)}
-                      />
-                    )
-                  }
-                  const approx = view.source?.includes('approximate') ?? false
+              {panelViews.every((panel) => !panel.configured) || panelViews.length === 0 ? <div className="relay_empty">{t('capNotConfigured')}</div>
+                : panelViews.map((panel) => {
+                  const models = panel.models ?? []
+                  const coverage = coverageCounts(models)
                   return (
-                    <div key={view.id} className="relay_capRowLine">
-                      <span className="relay_capNameCell">
-                        <span className="relay_capId" title={view.id}>{view.id}</span>
-                        {view.catalogName !== null && (
-                          <span className="relay_capMatch">{t('capMatchedName')(view.catalogName, approx)}</span>
-                        )}
-                      </span>
-                      {vendorOf(view.id) !== null && <Tag tone="outline">{vendorOf(view.id)}</Tag>}
-                      {sourceBadge(view)}
-                      <span className="relay_capSummary">{entrySummary({
-                        input: view.input ?? undefined,
-                        reasoning: view.reasoning ?? undefined,
-                        contextWindow: view.contextWindow ?? undefined,
-                      }, t)}</span>
-                      <span className="relay_capActions">
-                        <Button variant="outline" size="sm" disabled={openCard !== null} onClick={() => open('platform', view.id)}>
-                          {t('capEdit')}
-                        </Button>
-                      </span>
+                    <div key={panel.id} className="relay_capPanelGroup">
+                      <div className="relay_capPanelHead">
+                        <span className="relay_capPanelName">{panel.id}</span>
+                        <span className="relay_capHint">{t('capCoverage')(coverage.total, coverage.preset, coverage.catalog, coverage.override, coverage.none)}</span>
+                      </div>
+                      {!panel.configured || models.length === 0 ? <div className="relay_empty">{t('capNotConfigured')}</div>
+                        : models.map((view) => {
+                          if (isOpen('platform', view.id, panel.id)) {
+                            return (
+                              <PlatformCard
+                                key={`edit:${panel.id}:${view.id}`}
+                                panel={panel.id}
+                                view={view}
+                                override={caps.overrides?.[panel.id]?.[view.id]}
+                                vendor={vendorOf(panel.id, view.id)}
+                                routeDefault={panel.routeDefaultInput ?? ['text']}
+                                t={t}
+                                submit={(draft) => submitPlatformCard(panel.id, view.id, draft)}
+                                onClear={() => setOverrideClear({ panel: panel.id, id: view.id })}
+                                onClose={() => setOpenCard(null)}
+                              />
+                            )
+                          }
+                          const approx = view.source?.includes('approximate') ?? false
+                          const vendor = vendorOf(panel.id, view.id)
+                          return (
+                            <div key={`${panel.id}:${view.id}`} className="relay_capRowLine">
+                              <span className="relay_capNameCell">
+                                <span className="relay_capId" title={view.id}>{view.id}</span>
+                                {view.catalogName !== null && (
+                                  <span className="relay_capMatch">{t('capMatchedName')(view.catalogName, approx)}</span>
+                                )}
+                              </span>
+                              {vendor !== null && <Tag tone="outline">{vendor}</Tag>}
+                              {sourceBadge(view)}
+                              <span className="relay_capSummary">{entrySummary({
+                                input: view.input ?? undefined,
+                                reasoning: view.reasoning ?? undefined,
+                                contextWindow: view.contextWindow ?? undefined,
+                                maxTokens: view.maxTokens ?? undefined,
+                              }, t)}</span>
+                              <span className="relay_capActions">
+                                <Button variant="outline" size="sm" disabled={openCard !== null} onClick={() => open('platform', view.id, panel.id)}>
+                                  {t('capEdit')}
+                                </Button>
+                              </span>
+                            </div>
+                          )
+                        })}
                     </div>
                   )
                 })}
@@ -371,7 +451,7 @@ export function CapabilitiesView({ t, caps, models, refreshCaps, onMessage }: Ca
       <Modal
         open={overrideClear !== null}
         onClose={() => { setOverrideClear(null) }}
-        title={overrideClear !== null ? t('capOverrideClearTitle')(overrideClear) : ''}
+        title={overrideClear !== null ? t('capOverrideClearTitle')(overrideClear.id) : ''}
         closeLabel={t('close')}
         description={t('capOverrideClearDesc')}
         footer={(
@@ -385,7 +465,7 @@ export function CapabilitiesView({ t, caps, models, refreshCaps, onMessage }: Ca
   )
 }
 
-/** Shared field editors: modality pills, reasoning switch + level pills, context text input. */
+/** Shared field editors: modality pills, reasoning switch + level pills, context/output text inputs. */
 function CapabilityFields(props: {
   draft: CapabilityDraft
   onChange: (changes: Partial<CapabilityDraft>) => void
@@ -397,6 +477,9 @@ function CapabilityFields(props: {
   const contextText = draft.contextWindow
   const hint = contextWindowHint(contextText)
   const contextInvalid = contextText.trim() !== '' && hint === null
+  const maxText = draft.maxTokens
+  const maxHint = maxTokensHint(maxText)
+  const maxInvalid = maxText.trim() !== '' && maxHint === null
   return (
     <>
       <div className="relay_capRow">
@@ -461,6 +544,19 @@ function CapabilityFields(props: {
         />
         {contextInvalid && <span className="relay_capInvalid">{t('capContextInvalid')}</span>}
         {!contextInvalid && hint !== null && <span className="relay_capHint">{hint}</span>}
+      </div>
+      <div className="relay_capRow">
+        <span className="relay_capLegend">{t('capMaxTokensLegend')}</span>
+        <input
+          type="text"
+          className="relay_input relay_capContext"
+          placeholder={t('capMaxTokensPlaceholder')}
+          value={maxText}
+          onChange={(e) => onChange({ maxTokens: e.target.value })}
+        />
+        {maxInvalid && <span className="relay_capInvalid">{t('capMaxTokensInvalid')}</span>}
+        {!maxInvalid && maxHint !== null && <span className="relay_capHint">{maxHint}</span>}
+        {maxText.trim() === '' && <span className="relay_capHint">≤ {MAX_TOKENS_MAX.toLocaleString('en-US')}</span>}
       </div>
     </>
   )
@@ -529,8 +625,9 @@ function KbCard(props: {
   )
 }
 
-/** The one open platform editor card (per-id override), expanded in place. */
+/** The one open platform editor card (per-panel per-id override). */
 function PlatformCard(props: {
+  panel: string
   view: CapEntryView
   override: CapDictEntry | undefined
   vendor: string | null
@@ -540,7 +637,7 @@ function PlatformCard(props: {
   onClear: () => void
   onClose: () => void
 }): JSX.Element {
-  const { view, override, t, submit, onClear, onClose } = props
+  const { panel, view, override, t, submit, onClear, onClose } = props
   const [draft, setDraft] = useState<CapabilityDraft>(override !== undefined ? draftFromEntry(override) : draftFromView(view))
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -566,6 +663,7 @@ function PlatformCard(props: {
         </span>
         {props.vendor !== null && <Tag tone="outline">{props.vendor}</Tag>}
         {override !== undefined && <Tag tone="warning">{t('capSourceOverride')}</Tag>}
+        <Tag tone="quiet">{panel}</Tag>
       </div>
       <CapabilityFields draft={draft} onChange={onChange} t={t} routeDefault={props.routeDefault} />
       {error !== null && <div className="relay_msg relay_msgErr relay_cardMsg">{error}</div>}

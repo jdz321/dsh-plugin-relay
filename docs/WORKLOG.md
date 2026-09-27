@@ -389,3 +389,49 @@
 ### 13. 每周基线漂移 workflow（操作者需求：定时执行 preset:fetch）
 
 `.github/workflows/preset-refresh.yml`：每 7 天（cron 可改）跑 `preset:fetch`（纯 codegen、零 npm 依赖，CI 里无需 npm ci），diff 已提交基线：无漂移静默结束；有漂移 force-push `preset-refresh` 分支并开/更新 PR（含脚本输出），**不自动合并**，发布链路独立（tag 触发）。CI 无面板源 → 白名单口径；v0.5.1 面板源基线在位期间 PR 会含面板派生条目的移除（PR 正文已注明），SPEC-0.6.0 落地后收敛为纯 models.dev 漂移。
+
+---
+
+## 2026-09-28（v0.6.0 — 多套中转站 + 主流预置基线 + maxTokens + SVG 图表）
+
+> 按 docs/SPEC-0.6.0.md 实施（R1-R7 全部落地）。本条目只记研究结论、关键决策与偏离；逐条验收见 SPEC §12 DoD。
+
+### 1. 预置基线：主流口径的三个实现层决策
+
+- **白名单清单不静态存档**：spec §2.3 提到「316 规范名清单已存档 docs/local.md」，实际 local.md 未存（清单即规则：16 个第一方 provider 键 + 窗口 + 双信号剔除 + 去重）。实现直接以 `PRESET_PROVIDERS`（16 键，比 v0.5.1 的 10 键补齐 `-cn` 镜像与 xiaomi）为编译期清单，316 名由脚本从 live 数据推导——规则归一，避免两份清单漂移。
+- **发布日期只取第一方条目**（重要修正）：最初「跨全 provider 取最新 release_date」会被渠道脏数据污染——实测 aggregator 里 `gemini-2.5-pro` 标 `2026-01`、`gpt-oss` 标 `1970-01-01`，导致 spec 明示「出窗」的 gemini-2.5 系错误入册。改为白名单名只信第一方条目日期；全 provider 日期只兜 OpenRouter 注入名（无第一方条目可用）。修正后 140 条，与 spec ~145 的口径一致（差异 = live 数据漂移）。
+- **rekey 数据随迁**：建议/模态/日期三张映射最初按原始名索引、条目循环按最终名查找，rekey 条目（如 google-vertex 的 `xai/grok-4.20-reasoning`）会静默丢失——实测暴露后把三张映射统一 collapse 到最终名。
+
+### 2. 匹配层级 L0-L5
+
+- approximate 值语义从「剥层数」改为「层级号」（L1=1…L5=5）：下游只区分 exact/approximate，语义更准。strip 回归保持（v0.5.1 用例全绿）。
+- L3 双向互换在「双形态同时收录」时不会误配：面板 id 变换后先走 L0 精确、再走 L1 折叠唯一性，歧义自动放弃（用例覆盖）。
+- 真实面板对账（只读）：**67/83 命中，与 spec 预估分毫不差**；miss 16 = 图像视频 10 + gemini-2.5 系 3 + 渠道形态 2 + gemini-3-pro-preview 1（基线只有带日期戳形态）。近似命中 11 个（L1 casefold 5 + L3 版本分隔 + L4 变体补全 + L5 别名等）。
+
+### 3. 多面板：嵌套 secret 的脱敏验证路径
+
+- 子代理通读宿主源码实证：redact walker 对 `dict → object → role('secret')` 全覆盖（`packages/settings/settings/src/redact.ts` dict case 递归 inner，path 携带 dict 键；redact.spec.ts 有同构用例）——脱敏方式是**字段整体移除**（非掩码），`secrets` sidecar 记录 `{path, set}`。据此放弃回退方案（令牌迁移凭据引用），嵌套 secret 直存。
+- 红线落实：panels 内 accessToken **不设 default 不设 required**（README 的 schema envelope 会把 default 发给每个客户端、required 会在客户端 decode 脱敏值时失败——宿主 README 明文警告）；宿主进程内 `get()` 不脱敏（owner 语义），wire 面（settings-controller 全部 @Remote）强制 `redactSecrets: true`。
+- 走查实证：settings.yaml 落盘含明文（存储层，0600）；`/api/relay/panels` 与自建路由零泄漏；编辑卡 write-only（value 空 + 「已设置，留空保持不变」占位）；RPC envelope 的 describe 直接逆向成本过高，脱敏正确性由「宿主 redact 源码 + redact.spec + 本插件 schema 形状断言（build-shape）+ wire 面板路由零泄漏 + 编辑卡行为」五重证据链闭合。
+- **客户端写面板令牌不走 settingsScope**：面板 CRUD 全部走自建 `/api/relay/panels-*` 路由（宿主侧 mutate path ops），绕开 scope.set 只支持单段 path 的限制，也让「keyRef 生成去重」「id 唯一性」在宿主单点收口。
+
+### 4. 面板 id 与操作者 home 的迁移
+
+- 面板 id 即路由键与提供方名。操作者真实 home 的 `agent-default-model.provider: relay` 与 `apiKeyEnv: RELAY_API_KEY` 依赖路由键 `relay`——迁移时面板 id 取 **`relay`**（恰好合法），agent-default-model、凭据解析路径、`.credentials.yaml` 全部零改动。改名需求 = 删除重建（UI 文案已注明）。
+- settings.yaml 改写清单（已授权，0600 保持）：`relay:` 平铺连接字段 → `relay.panels.relay`（id/baseUrl/relayKind/accessToken 原值/userId/keyRef 显式 RELAY_API_KEY/selectedKeyName 原值）+ 空壳 `capabilityCatalog/Overrides: {}`；`llm-pi-ai.providers.relay` 增 `displayName: relay`（路由键不变，模型条目原样）；其余 section 未动。
+
+### 5. SVG 图表
+
+- 布局数学抽纯函数（niceScale/xLabelIndices/stackedColumns）vitest 直测；Y 轴 1-2-5 步进，**spec 说「整数刻度」——实现允许 sub-1 数据走 0.25/0.5 小数步**（mock 面板日消耗 ¥0.02 量级，整数轴下完全不可读），≥1 恒为整数，偏离已记录。
+- tokenCountText 改 1024 基（spec §8.3 明确 1048576→1M；原实现十进制会显示 1.05M）。旧图 Y 轴 TPM/Token 显示随之变化（45000 → 43.95k）。
+- recharts 移除后 client 产物 983KB → **95KB**；build-shape 新增 ≤350KB 断言防回退；client 构建的 `process.env.NODE_ENV` define 一并删除（无依赖树再需要）。
+
+### 6. 走查中修掉的真缺陷
+
+- 能力页 caps 数据只在挂载时拉取：在二级页切 key（建路由）后返回主页，平台模型区会显示过期的「未配置」——refreshCaps 依赖补 `snapshot.revision` 与 `openPanelId`。
+- 覆盖 ops 删空后面板组残留 `{}` 空壳——applyCapabilityOps 增加「unset 后组为空则连组 unset」收尾（顶层 dict 的 `{}` 是 schema 既定语义，保留）。
+
+### 7. 走查环境备忘（后人少踩坑）
+
+- 本轮 IAB 输入管线失效（四种输入方式都打不进 dsh 对话框），按 AGENTS §6 兜底走本机 Chrome headless + `ws` CDP 直驱：**`Runtime.evaluate` 里 DOM `.click()` / React 原生 setter 是唯一稳定路径**（Playwright locator 与 CUA 坐标都被对话框拦截）；脚本要点后验证再重试（点击会被吞）；ws 连接不关 node 不退出（每脚本 process.exit）。
+- 刷新预置实测通过（140 条 + 「并同步到模型目录」）；连接测试四态（正常/坏 token/坏 userId/死端口）文案全部按设计命中。

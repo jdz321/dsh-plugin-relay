@@ -10,7 +10,8 @@
  * reasoning ON with the middle effort level, which the user can adjust.
  * A model id may appear under several providers; suggestions merge (modalities
  * union; the most specific reasoning shape wins; largest known context window
- * wins). `limit.context` feeds the knowledge base's default context window.
+ * and output limit win). `limit.context` feeds the knowledge base's default
+ * context window; `limit.output` (v0.6.0) feeds maxTokens the same way.
  */
 
 import { EFFORT_LEVELS, MODALITIES } from './constants.js'
@@ -22,10 +23,12 @@ export interface CapabilitySuggestion {
   reasoning: false | { levels: string[] } | null
   /** Default context window in tokens (models.dev `limit.context`), when known. */
   contextWindow?: number
+  /** Default output limit in tokens (models.dev `limit.output`), when known. */
+  maxTokens?: number
 }
 
-interface ModelsDevEntry {
-  modalities?: { input?: string[] }
+export interface ModelsDevEntry {
+  modalities?: { input?: string[], output?: string[] }
   reasoning?: boolean
   reasoning_options?: Array<{ type?: string, values?: string[] } & Record<string, unknown>>
   limit?: { context?: number, output?: number }
@@ -67,8 +70,15 @@ export function mapModelsDevEntry(entry: ModelsDevEntry | undefined): Capability
   }
   const context = Number(entry.limit?.context)
   const contextWindow = Number.isFinite(context) && context > 0 ? context : undefined
-  if (!input.length && reasoning === null && contextWindow === undefined) return null
-  return { input, reasoning, ...(contextWindow !== undefined ? { contextWindow } : {}) }
+  const output = Number(entry.limit?.output)
+  const maxTokens = Number.isInteger(output) && output > 0 ? output : undefined
+  if (!input.length && reasoning === null && contextWindow === undefined && maxTokens === undefined) return null
+  return {
+    input,
+    reasoning,
+    ...(contextWindow !== undefined ? { contextWindow } : {}),
+    ...(maxTokens !== undefined ? { maxTokens } : {}),
+  }
 }
 
 /** Merge suggestions for the same model id seen under several providers. */
@@ -90,11 +100,14 @@ export function mergeSuggestions(suggestions: readonly (CapabilitySuggestion | n
   }
   const windows = usable.map((s) => s.contextWindow).filter((w): w is number => typeof w === 'number')
   const contextWindow = windows.length ? Math.max(...windows) : undefined
-  if (!orderedInput.length && reasoning === null && contextWindow === undefined) return null
+  const outputs = usable.map((s) => s.maxTokens).filter((w): w is number => typeof w === 'number')
+  const maxTokens = outputs.length ? Math.max(...outputs) : undefined
+  if (!orderedInput.length && reasoning === null && contextWindow === undefined && maxTokens === undefined) return null
   return {
     input: orderedInput,
     reasoning,
     ...(contextWindow !== undefined ? { contextWindow } : {}),
+    ...(maxTokens !== undefined ? { maxTokens } : {}),
   }
 }
 

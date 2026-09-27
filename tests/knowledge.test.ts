@@ -6,29 +6,77 @@ import {
   matchCatalogName,
   normalizeCapabilityEntry,
   normalizeKnowledgeConfig,
+  PRESET_ALIASES,
   validateCapabilityEntry,
   type KnowledgeConfig,
+  type KnowledgeView,
 } from '../src/knowledge.js'
 import type { RouteModelEntry } from '../src/types.js'
 
-const EMPTY: KnowledgeConfig = { capabilityCatalog: {}, capabilityOverrides: {} }
+const EMPTY: KnowledgeView = { capabilityCatalog: {}, capabilityOverrides: {} }
 
-describe('matchCatalogName (exact → strip variant suffix → give up)', () => {
-  const names = ['qwen3.8-max', 'gemini-3.6-flash', 'deepseek-chat']
+describe('matchCatalogName hierarchy L0-L5 (SPEC-0.6.0 §3.3)', () => {
+  const names = ['qwen3.8-max', 'gemini-3.6-flash', 'deepseek-chat', 'MiniMax-M3', 'claude-fable-5-1', 'gemini-3.1-pro-preview']
 
-  it('matches exact ids first (case sensitive)', () => {
+  it('L0 — matches exact ids first (case sensitive)', () => {
     expect(matchCatalogName('deepseek-chat', names)).toEqual({ name: 'deepseek-chat', approximate: 0 })
-    expect(matchCatalogName('Deepseek-Chat', names)).toBeNull()
+    expect(matchCatalogName('Deepseek-Chat', names)).not.toEqual({ name: 'Deepseek-Chat', approximate: 0 })
   })
 
-  it('strips one trailing segment and marks the hit approximate', () => {
-    expect(matchCatalogName('qwen3.8-max-0902', names)).toEqual({ name: 'qwen3.8-max', approximate: 1 })
-    expect(matchCatalogName('gemini-3.6-flash-tiered', names)).toEqual({ name: 'gemini-3.6-flash', approximate: 1 })
+  it('L1 — case-folded exact hits the one same-model spelling (minimax-m3 ↔ MiniMax-M3)', () => {
+    expect(matchCatalogName('minimax-m3', names)).toEqual({ name: 'MiniMax-M3', approximate: 1 })
+    expect(matchCatalogName('DEEPSEEK-CHAT', names)).toEqual({ name: 'deepseek-chat', approximate: 1 })
   })
 
-  it('strips at most two levels', () => {
+  it('L1 — ambiguous fold (several names collapse alike) gives up entirely', () => {
+    const ambiguous = ['Foo-Bar', 'foo-bar', 'other']
+    expect(matchCatalogName('FOO-BAR', ambiguous)).toBeNull()
+  })
+
+  it('L2 — strips one trailing segment and marks the hit approximate', () => {
+    expect(matchCatalogName('qwen3.8-max-0902', names)).toEqual({ name: 'qwen3.8-max', approximate: 2 })
+    expect(matchCatalogName('gemini-3.6-flash-tiered', names)).toEqual({ name: 'gemini-3.6-flash', approximate: 2 })
+  })
+
+  it('L2 — strips at most two levels', () => {
     expect(matchCatalogName('deepseek-chat-a-b', names)).toEqual({ name: 'deepseek-chat', approximate: 2 })
     expect(matchCatalogName('deepseek-chat-a-b-c', names)).toBeNull()
+  })
+
+  it('L2 — folded candidate works within a strip level', () => {
+    expect(matchCatalogName('minimax-m3-x', names)).toEqual({ name: 'MiniMax-M3', approximate: 2 })
+  })
+
+  it('L3 — version separator swaps both directions (claude-fable-5.1 ↔ claude-fable-5-1)', () => {
+    expect(matchCatalogName('claude-fable-5.1', names)).toEqual({ name: 'claude-fable-5-1', approximate: 3 })
+    // reverse direction: the panel spells with a dash where the catalog has a dot
+    const dotted = [...names, 'gpt-4.1']
+    expect(matchCatalogName('gpt-4-1', dotted)).toEqual({ name: 'gpt-4.1', approximate: 3 })
+  })
+
+  it('L3 — folded uniqueness still applies after the swap', () => {
+    expect(matchCatalogName('CLAUDE-FABLE-5.1', names)).toEqual({ name: 'claude-fable-5-1', approximate: 3 })
+  })
+
+  it('L4 — unique variant completion (gemini-3.1-pro + preview)', () => {
+    expect(matchCatalogName('gemini-3.1-pro', names)).toEqual({ name: 'gemini-3.1-pro-preview', approximate: 4 })
+  })
+
+  it('L4 — several possible completions abort (fixed token set + uniqueness)', () => {
+    const multi = ['gemini-3.1-pro-preview', 'gemini-3.1-pro-exp', 'unrelated']
+    expect(matchCatalogName('gemini-3.1-pro', multi)).toBeNull()
+    // gemini-3-pro-image-preview stays a strip-1 base of the id below → the
+    // completion `gemini-3-pro-preview` may not exist; uniqueness holds only
+    // when exactly one (base, token) pair lands.
+    const multiBase = ['gemini-3-pro-preview', 'gemini-3-pro-exp']
+    expect(matchCatalogName('gemini-3-pro', multiBase)).toBeNull()
+  })
+
+  it('L5 — the curated alias table resolves k3 → kimi-k3', () => {
+    expect(PRESET_ALIASES.k3).toBe('kimi-k3')
+    const withKimi = [...names, 'kimi-k3']
+    expect(matchCatalogName('k3', withKimi)).toEqual({ name: 'kimi-k3', approximate: 5 })
+    expect(matchCatalogName('k3', names)).toBeNull() // target must exist
   })
 
   it('never matches a bare prefix without the dash boundary', () => {
@@ -39,6 +87,14 @@ describe('matchCatalogName (exact → strip variant suffix → give up)', () => 
   it('gives up on panel-only models', () => {
     expect(matchCatalogName('grok-video', names)).toBeNull()
     expect(matchCatalogName('gpt-image-2.5-flare', names)).toBeNull()
+  })
+
+  it('v0.5.1 regression — the 19 caseform pairs stay same-model folds, strips stay exact-boundary', () => {
+    // measured behavior: case-insensitive folding only via full equality;
+    // no substring/fuzzy matching anywhere.
+    expect(matchCatalogName('minimax-m3', ['MiniMax-M2', 'MiniMax-M3'])).toEqual({ name: 'MiniMax-M3', approximate: 1 })
+    expect(matchCatalogName('minimax-m3xyz', ['MiniMax-M3'])).toBeNull()
+    expect(matchCatalogName('minimaxx-m3', ['MiniMax-M3'])).toBeNull()
   })
 })
 
@@ -57,13 +113,23 @@ describe('normalizeKnowledgeConfig / normalizeCapabilityEntry', () => {
     expect(normalizeCapabilityEntry({ reasoning: ['high', 'ultra'] })?.reasoning).toEqual(['high', 'ultra'])
   })
 
-  it('reads both dicts and skips blank names', () => {
+  it('keeps a positive maxTokens and drops non-finite ones', () => {
+    expect(normalizeCapabilityEntry({ maxTokens: 65536 })?.maxTokens).toBe(65536)
+    expect(normalizeCapabilityEntry({ maxTokens: 'x' })?.maxTokens).toBeUndefined()
+    expect(normalizeCapabilityEntry({ maxTokens: Infinity })?.maxTokens).toBeUndefined()
+  })
+
+  it('reads both dicts, groups overrides per panel, and skips blank names', () => {
     const config = normalizeKnowledgeConfig({
       capabilityCatalog: { ' a ': { input: ['text'] }, '': { input: ['text'] }, bad: {} },
-      capabilityOverrides: 'garbage',
+      capabilityOverrides: {
+        ' p1 ': { m: { input: ['text'] } },
+        empty: {},
+        bad: 'garbage',
+      },
     })
     expect(config.capabilityCatalog).toEqual({ a: { input: ['text'] } })
-    expect(config.capabilityOverrides).toEqual({})
+    expect(config.capabilityOverrides).toEqual({ p1: { m: { input: ['text'] } } })
   })
 })
 
@@ -75,6 +141,12 @@ describe('validateCapabilityEntry (save-boundary validation)', () => {
     expect(() => validateCapabilityEntry({ contextWindow: 4096 }, 'x')).not.toThrow()
   })
 
+  it('rejects maxTokens beyond 1,048,576 and non-integers', () => {
+    expect(() => validateCapabilityEntry({ maxTokens: 1_048_577 }, 'x')).toThrow(/输出上限/)
+    expect(() => validateCapabilityEntry({ maxTokens: 1.5 }, 'x')).toThrow(/输出上限/)
+    expect(() => validateCapabilityEntry({ maxTokens: 1_048_576 }, 'x')).not.toThrow()
+  })
+
   it('rejects empty reasoning level lists and unknown modalities', () => {
     expect(() => validateCapabilityEntry({ reasoning: [] }, 'x')).toThrow(/档位/)
     expect(() => validateCapabilityEntry({ input: ['video'] }, 'x')).toThrow(/模态/)
@@ -82,11 +154,12 @@ describe('validateCapabilityEntry (save-boundary validation)', () => {
 
   it('rejects entries without any configuration', () => {
     expect(() => validateCapabilityEntry({}, 'x')).toThrow(/至少/)
+    expect(() => validateCapabilityEntry({ maxTokens: undefined }, 'x')).toThrow(/至少/)
   })
 })
 
 describe('deriveCapabilityFor (override > catalog > none)', () => {
-  const kb: KnowledgeConfig = {
+  const kb: KnowledgeView = {
     capabilityCatalog: {
       'gemini-3.6-flash': { input: ['text', 'image'], reasoning: ['low'], contextWindow: 1048576 },
     },
@@ -116,6 +189,15 @@ describe('deriveCapabilityFor (override > catalog > none)', () => {
     expect(derived.catalogName).toBe('gemini-3.6-flash')
   })
 
+  it('carries maxTokens from a matched entry', () => {
+    const withMax: KnowledgeView = {
+      capabilityCatalog: { base: { maxTokens: 65536 } },
+      capabilityOverrides: { capped: { maxTokens: 32768 } },
+    }
+    expect(deriveCapabilityFor('base', withMax).maxTokens).toBe(65536)
+    expect(deriveCapabilityFor('capped', withMax)).toMatchObject({ source: 'override', maxTokens: 32768 })
+  })
+
   it('returns source null for unknown ids', () => {
     expect(deriveCapabilityFor('grok-video', kb).source).toBeNull()
     expect(deriveCapabilityFor('anything', EMPTY)).toEqual({ source: null })
@@ -123,7 +205,7 @@ describe('deriveCapabilityFor (override > catalog > none)', () => {
 })
 
 describe('deriveCapabilityFor with the preset layer (user ∪ preset name sets)', () => {
-  const kb: KnowledgeConfig = {
+  const kb: KnowledgeView = {
     capabilityCatalog: { 'deepseek-chat': { reasoning: ['low'] } },
     capabilityOverrides: {},
     capabilityPreset: { 'deepseek-chat': { reasoning: false }, 'gpt-6.1': { contextWindow: 400000 } },
@@ -141,7 +223,7 @@ describe('deriveCapabilityFor with the preset layer (user ∪ preset name sets)'
   })
 
   it('the union name set matches; a nearer user name beats a farther preset name', () => {
-    const mixed: KnowledgeConfig = {
+    const mixed: KnowledgeView = {
       capabilityCatalog: { 'foo-bar': { reasoning: false } },
       capabilityOverrides: {},
       capabilityPreset: { foo: { reasoning: ['high'] } },
@@ -153,7 +235,7 @@ describe('deriveCapabilityFor with the preset layer (user ∪ preset name sets)'
   })
 
   it('overrides still beat the preset layer', () => {
-    const withOverride: KnowledgeConfig = {
+    const withOverride: KnowledgeView = {
       ...kb,
       capabilityOverrides: { 'gpt-6.1': { reasoning: false } },
     }
@@ -162,7 +244,7 @@ describe('deriveCapabilityFor with the preset layer (user ∪ preset name sets)'
 })
 
 describe('applyDerivedCapabilities (route entry rewrite rules)', () => {
-  const kb: KnowledgeConfig = {
+  const kb: KnowledgeView = {
     capabilityCatalog: { base: { input: ['text'], reasoning: false, contextWindow: 131072 } },
     capabilityOverrides: { special: { contextWindow: 2000000 } },
   }
@@ -188,6 +270,21 @@ describe('applyDerivedCapabilities (route entry rewrite rules)', () => {
     expect(next.find((e) => e.id === 'unconfigured')).toBe(models[2])
   })
 
+  it('maxTokens: writes only when configured; clearing the config falls back to the heuristic', async () => {
+    const withMax: KnowledgeView = {
+      capabilityCatalog: { m: { maxTokens: 65536 } },
+      capabilityOverrides: {},
+    }
+    const models: RouteModelEntry[] = [{ id: 'm', maxTokens: 8192 }]
+    expect(applyDerivedCapabilities(models, withMax)[0]!.maxTokens).toBe(65536)
+    // config without maxTokens → the entry's heuristic value stays
+    const withoutMax: KnowledgeView = {
+      capabilityCatalog: { m: { contextWindow: 131072 } },
+      capabilityOverrides: {},
+    }
+    expect(applyDerivedCapabilities(models, withoutMax)[0]!.maxTokens).toBe(8192)
+  })
+
   it('maps reasoning level lists onto the reasoningEfforts dict with off pinned', () => {
     const next = applyDerivedCapabilities([{ id: 'base' }], knowledgeOf({ base: { reasoning: ['low', 'high'] } }))
     expect(next[0]!.reasoningEfforts).toEqual({ off: null, low: 'low', high: 'high' })
@@ -199,6 +296,6 @@ describe('applyDerivedCapabilities (route entry rewrite rules)', () => {
   })
 })
 
-function knowledgeOf(catalog: Record<string, { reasoning?: false | string[] }>): KnowledgeConfig {
+function knowledgeOf(catalog: Record<string, { reasoning?: false | string[] }>): KnowledgeView {
   return { capabilityCatalog: catalog, capabilityOverrides: {} }
 }
