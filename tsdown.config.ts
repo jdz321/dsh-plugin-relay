@@ -71,20 +71,4 @@ export default defineConfig([
       footer: 'return module.exports; } });',
     },
   },
-  {
-    // Node-side helpers for `npm run preset:fetch`; not a package export.
-    name: `${id}/preset-tools`,
-    entry: { 'preset-tools': 'src/preset-tools.ts' },
-    outDir: 'lib',
-    format: 'esm',
-    platform: 'node',
-    target: 'es2024',
-    fixedExtension: false,
-    dts: false,
-    clean: false,
-    deps: {
-      neverBundle: [...HOST_EXTERNALS],
-      onlyBundle: false,
-    },
-  },
 ])

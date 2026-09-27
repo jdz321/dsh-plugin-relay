@@ -66,7 +66,8 @@ npm publish        # prepublishOnly 会先跑 typecheck + build
 
 ## 7. 预置知识库基线（维护节奏）
 
-- [ ] 主流模型发布潮后跑 `npm run preset:fetch`（读 `.dsh-home` 的面板地址与 models.dev，全程无凭据），diff 产物 `src/knowledge-preset.generated.ts` 并随代码一起提交。
+- [ ] **每周自动**：`preset-refresh` workflow（每 7 天，cron 在 workflow 顶部可改）跑 `preset:fetch` 与已提交基线 diff，有漂移自动开 PR 供审阅——**不自动合并**；CI 无面板源，跑的是 models.dev 白名单口径（v0.5.1 面板源基线在位期间，PR 会同时去掉面板派生条目，审阅时注意；SPEC-0.6.0 落地后即为纯漂移）。
+- [ ] 主流模型发布潮后也可手动跑 `npm run preset:fetch`（读 `.dsh-home` 的面板地址与 models.dev，全程无凭据），diff 产物 `src/knowledge-preset.generated.ts` 并随代码一起提交。
 - [ ] 生成文件头部只允许计数信息——**不得**出现面板地址、账号等任何身份信息。
 
 ## 8. 发版节奏（后续版本，自动化后）

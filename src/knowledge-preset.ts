@@ -144,7 +144,7 @@ export function buildPresetEntries(
   return {
     entries,
     panelOnlyNames: [...panelHits].filter((name) => !whitelistNames.has(name)).sort(),
-    dropped,
+    dropped: dropped.sort(),
     panelTotal: panelModels ? panelModels.filter((raw) => String(raw).trim() !== '').length : 0,
     agedOut,
   }

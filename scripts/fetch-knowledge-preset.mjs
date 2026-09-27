@@ -8,8 +8,14 @@
  * Sources: the panel's PUBLIC /api/pricing (no credentials read or sent; the
  * default panel origin is the repo .dsh-home/settings.yaml `relay.baseUrl` —
  * only that one field is read) plus https://models.dev/api.json via the usual
- * https_proxy env. The builder comes from lib/preset-tools.js (built by the
- * same command), so the script and the runtime share one implementation.
+ * https_proxy env. Runs the src/*.ts builder directly through Node's type
+ * stripping (scripts/ts-resolver.mjs maps the intra-source `.js` specifiers),
+ * so the script and the runtime always share one implementation.
+ *
+ * This is a pure codegen step: it only rewrites the generated source file and
+ * never builds. lib/ artifacts pick the new baseline up through the normal
+ * channels — `npm run build` like any src change locally, `prepublishOnly`
+ * at publish time, and the build step of the CI workflows.
  *
  * The generated file is committed; its header carries counts only, never the
  * panel identity or anything account-specific.
@@ -18,7 +24,8 @@ import { readFileSync, statSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { buildPresetEntries, envProxy, panelModelNames, PRESET_MAX_AGE_DAYS, PRESET_PROVIDERS, requestJson } from '../lib/preset-tools.js'
+import { buildPresetEntries, panelModelNames, PRESET_MAX_AGE_DAYS, PRESET_PROVIDERS } from '../src/knowledge-preset.ts'
+import { envProxy, requestJson } from '../src/http.ts'
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const OUT = path.join(ROOT, 'src', 'knowledge-preset.generated.ts')

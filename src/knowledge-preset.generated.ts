@@ -2,7 +2,7 @@
 // Sources: models.dev api.json @ 2026-09-27 (10/10 whitelist providers present)
 // Policy: models released within the last 183 days only (built 2026-09-27).
 //        + panel pricing (public endpoint): 83 ids → 80 matched, 18 outside the whitelist
-// Panel-specific ids dropped (no models.dev match): grok-video, grok-imagine, gpt-image-2.5
+// Panel-specific ids dropped (no models.dev match): gpt-image-2.5, grok-imagine, grok-video
 export const KNOWLEDGE_PRESET: Record<string, { input?: string[], reasoning?: false | string[], contextWindow?: number }> = {
   "MiniMax-M3": {
     "input": [

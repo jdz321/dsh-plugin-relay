@@ -381,3 +381,11 @@
 - 分组选项展示格式「分组名 倍率 (描述)」（如 claude-stable 0.65x (高智高缓，稳定)）：宿主 `/keys` 响应新增 `groupRatios`（pricing.groupRatio 过滤后透传），客户端 `groupOptionLabel`（format.ts，缺倍率/描述的分组自动省略对应段）；MenuSelect 锚点与选项同步该格式。mock（default 1x / vip 0.8x）与真实面板（claude-stable 0.65x，与操作者示例逐字一致）双验证。
 - key 名称留空回退分组名：KeyCard.apply 内 `name = form.name.trim() || form.group.trim()`，回退值回填表单（失败卡保持时所见即所得）；分组为空时仍报「请选择分组」（此时名称无从回退）。keyFormError 签名改为接收生效 name/group。mock 验证：空名创建 → key 命名为所选分组；编辑态清空名称应用 → 回退为分组名。
 - 新增 tests/format.test.ts（groupOptionLabel 矩阵）；121/121 全绿。
+
+### 12. preset:fetch 管线简化（操作者反馈：build→fetch→build 两次 build 很怪）
+
+根因：脚本消费 lib/preset-tools.js（先 build）；生成物变更需烘入 lib/index.js（再 build）。修复：新增 `scripts/ts-resolver.mjs`（`module.registerHooks` 把源码内部 `.js` 引用解析到 `.ts`，约 20 行，Node ≥22.18 类型剥离默认开启），脚本直接 import `../src/*.ts` 与运行时共享同一份 builder——脚本改为**纯 codegen**（只重写生成的源文件，不触发 build）：lib/ 是编译产物，产物同步走「改 src 后手动 build」的既有约定 / `prepublishOnly`（发布）/ CI 的 build 步骤，preset:fetch 不越权；删除 `src/preset-tools.ts` 与 tsdown 的 preset-tools 产物（build 从 3 产物回到 2 产物）。顺带把 `buildPresetEntries` 的 `dropped` 列表排序稳定化（此前随面板返回顺序抖动，generated.ts 会出现无意义的 diff）。验证：直跑产物与基线数据一致（97 条），121/121 全绿。约束：脚本需 Node ≥22.18（维护者本机环境，AGENTS §3 已注明）。
+
+### 13. 每周基线漂移 workflow（操作者需求：定时执行 preset:fetch）
+
+`.github/workflows/preset-refresh.yml`：每 7 天（cron 可改）跑 `preset:fetch`（纯 codegen、零 npm 依赖，CI 里无需 npm ci），diff 已提交基线：无漂移静默结束；有漂移 force-push `preset-refresh` 分支并开/更新 PR（含脚本输出），**不自动合并**，发布链路独立（tag 触发）。CI 无面板源 → 白名单口径；v0.5.1 面板源基线在位期间 PR 会含面板派生条目的移除（PR 正文已注明），SPEC-0.6.0 落地后收敛为纯 models.dev 漂移。

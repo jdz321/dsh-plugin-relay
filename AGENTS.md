@@ -47,12 +47,12 @@
 │  ├─ knowledge-preset.ts             # 预置构建纯逻辑（脚本与运行时共用；白名单在此）
 │  ├─ knowledge-preset.generated.ts   # preset:fetch 产物（入库；头部只有计数）
 │  ├─ capability-ops.ts # POST /capabilities 定向 ops 处理（可测核心）
-│  ├─ preset-tools.ts   # 供 fetch 脚本 import 的构建期聚合导出（→ lib/preset-tools.js）
 │  ├─ http.ts          # HTTP(S) 客户端（超时、可选代理 CONNECT）
 │  └─ client/          # 浏览器设置页（六选项卡；section / capabilities / menu-select / dashboard / logs / locale / styles …）
 ├─ scripts/dev.js      # npm start 开发启动器（强制 DSH_HOME=<仓库>/.dsh-home，默认端口 3098）
 ├─ scripts/dev.d.ts    # dev.js 的类型声明（供 dev-home 测试导入）
-├─ scripts/fetch-knowledge-preset.mjs  # npm run preset:fetch（先 build 再生成预置基线）
+├─ scripts/fetch-knowledge-preset.mjs  # npm run preset:fetch（纯 codegen：node 类型剥离直跑 src，重写生成的源文件，不触发 build）
+├─ scripts/ts-resolver.mjs             # 供上脚本 --import 预载：把源码内部 .js 引用解析到 .ts（需 Node ≥22.18）
 ├─ tests/              # vitest：单测 + fake-settings + mock 中转站面板 + 产物形状/命名审计
 └─ docs/               # WORKLOG、SPEC、发布清单等开发文档
 ```
@@ -62,10 +62,10 @@
 ```sh
 npm install        # @deepseek-ai/dsh 是 devDependency；运行时零 dependencies（schemastery 为 peerDependency）
 npm run typecheck  # tsc --noEmit
-npm run build      # tsdown → lib/index.js（宿主 ESM）+ lib/client.js（浏览器包裹产物）+ lib/preset-tools.js（脚本用）
+npm run build      # tsdown → lib/index.js（宿主 ESM）+ lib/client.js（浏览器包裹产物）
 npm test           # vitest run（mock 面板 + fake-settings，一律不读写真实 .dsh-home）
 npm start          # 开发启动：dsh web --port 3098，DSH_HOME 强制 = <仓库>/.dsh-home；--dsh-home <dir> / --port <n> 可覆盖
-npm run preset:fetch   # 先 build 再拉「面板公开 pricing ∪ models.dev」重新生成 src/knowledge-preset.generated.ts
+npm run preset:fetch   # 拉「面板公开 pricing ∪ models.dev」重新生成 src/knowledge-preset.generated.ts（纯 codegen，不 build——产物同步走手动 build / prepublishOnly / CI；脚本经 scripts/ts-resolver.mjs 直跑 src，需 Node ≥22.18）
 ```
 
 改动 src/ 后必须 `npm run build`，再重装/重链 profile；正在运行的 dsh 实例要重启才会加载新宿主产物（client 产物刷新页面即可）。

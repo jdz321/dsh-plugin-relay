@@ -1,0 +1,72 @@
+# Weekly knowledge-preset baseline refresh (preset:fetch is pure codegen —
+# zero npm dependencies, runs the src/*.ts builder via Node type stripping).
+#
+# Frequency is the cron line below (every 7 days). When the regenerated
+# baseline differs from the committed one, a PR is opened for review; it is
+# never auto-merged, and npm publishing stays independent (publish.yml, tags).
+#
+# NOTE: CI has no panel source (.dsh-home does not exist here), so the run is
+# whitelist-only. While the v0.5.1 panel-sourced baseline design is in place,
+# diffs may also drop panel-derived names — review accordingly; after
+# SPEC-0.6.0 (mainstream-only baseline) lands, diffs are pure models.dev drift.
+
+name: Refresh preset baseline
+
+on:
+  schedule:
+    - cron: '23 2 * * 1' # every 7 days (Monday); GitHub may delay by some minutes
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Regenerate the baseline
+        run: |
+          set -o pipefail
+          npm run preset:fetch 2>&1 | tee preset-fetch.log
+
+      - name: Detect drift
+        id: drift
+        run: |
+          if git diff --quiet src/knowledge-preset.generated.ts; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "No drift — baseline matches models.dev."
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Open a refresh PR
+        if: steps.drift.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B preset-refresh
+          git add src/knowledge-preset.generated.ts
+          git commit -m "chore: refresh knowledge preset baseline (weekly preset:fetch)"
+          git push --force origin preset-refresh
+          BODY=$(printf '%s\n' \
+            "Weekly \`preset:fetch\` drift (models.dev-only run; CI has no panel source)." \
+            "" \
+            '```' \
+            "$(cat preset-fetch.log)" \
+            '```' \
+            "" \
+            "Review, then squash-merge to land the refreshed baseline. Publishing to npm is independent (tag-triggered).")
+          gh pr create \
+            --title "chore: refresh knowledge preset baseline (weekly)" \
+            --body "$BODY" \
+            --base main \
+            --head preset-refresh \
+          || echo "PR for preset-refresh already exists — the force-push above updated it."

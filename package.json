@@ -42,7 +42,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "start": "node scripts/dev.js",
-    "preset:fetch": "npm run build && node scripts/fetch-knowledge-preset.mjs && npm run build",
+    "preset:fetch": "node --import ./scripts/ts-resolver.mjs scripts/fetch-knowledge-preset.mjs",
     "prepublishOnly": "npm run typecheck && npm run build"
   },
   "peerDependencies": {
