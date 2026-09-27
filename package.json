@@ -4,6 +4,14 @@
   "description": "DeepSeek Harness (dsh) plugin that routes model traffic through any new-api-family relay panel (one-api / new-api / Veloera / done-hub / ...): manage the connection, create / edit / delete and switch API keys, sync each key's model list with pricing, review usage dashboard and logs, and configure model capabilities from a knowledge base — all from the dsh web settings page",
   "type": "module",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jdz321/dsh-plugin-relay.git"
+  },
+  "bugs": {
+    "url": "https://github.com/jdz321/dsh-plugin-relay/issues"
+  },
+  "homepage": "https://github.com/jdz321/dsh-plugin-relay#readme",
   "main": "lib/index.js",
   "exports": {
     ".": "./lib/index.js",
