@@ -105,6 +105,19 @@ export function pointsToCnyText(points: number): string {
   return trimNum(points / 500000)
 }
 
+/**
+ * Label of one group option in the key editor's group selector:
+ * 「claude-stable 0.65x (高智高缓，稳定)」 — ratio and description pieces drop
+ * out when the panel does not report them.
+ */
+export function groupOptionLabel(name: string, ratio: number | null | undefined, description: string | null | undefined): string {
+  let label = name
+  if (typeof ratio === 'number' && Number.isFinite(ratio)) label += ` ${trimNum(ratio)}x`
+  const desc = (description ?? '').trim()
+  if (desc) label += ` (${desc})`
+  return label
+}
+
 /** Local `MM-DD HH:mm:ss` for a unix-seconds log timestamp. */
 export function formatLogTime(seconds: number): string {
   if (!Number.isFinite(seconds) || seconds <= 0) return '—'

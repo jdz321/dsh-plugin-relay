@@ -18,6 +18,7 @@ import { DashboardTab } from './dashboard.js'
 import {
   dateInputValue,
   endOfDaySeconds,
+  groupOptionLabel,
   keyMetaText,
   normalizeBaseUrlDraft,
   pointsToCnyText,
@@ -75,6 +76,8 @@ interface KeysData {
   error?: string
   account?: { username?: string, quotaCny?: string } | null
   groups?: Record<string, string>
+  /** Group billing ratios (name → ratio) for the group selector labels. */
+  groupRatios?: Record<string, number>
   keys?: KeyRow[]
 }
 
@@ -409,6 +412,7 @@ export function RelaySection(props: SectionEnv): JSX.Element {
                     <KeyCard
                       form={newKeyForm()}
                       groups={keys.groups ?? {}}
+                      groupRatios={keys.groupRatios ?? {}}
                       t={t}
                       readOnly={readOnly}
                       submit={submitKeyForm}
@@ -424,6 +428,7 @@ export function RelaySection(props: SectionEnv): JSX.Element {
                           key={`edit:${String(key.id)}`}
                           form={editKeyForm(key)}
                           groups={keys.groups ?? {}}
+                          groupRatios={keys.groupRatios ?? {}}
                           t={t}
                           readOnly={readOnly}
                           submit={submitKeyForm}
@@ -559,10 +564,11 @@ function editKeyForm(key: KeyRow): KeyForm {
   }
 }
 
-/** Validate the card locally; returns the error text or null. */
-function keyFormError(form: KeyForm, t: Translator): string | null {
-  if (!form.name.trim()) return `${t('keyName')}: ${t('keyNamePlaceholder')}`
-  if (!form.group.trim()) return t('keyGroupRequired')
+/** Validate the card locally; returns the error text or null. `name`/`group`
+ *  are the effective values (an empty name falls back to the group name). */
+function keyFormError(form: KeyForm, t: Translator, name: string, group: string): string | null {
+  if (!group) return t('keyGroupRequired')
+  if (!name) return `${t('keyName')}: ${t('keyNamePlaceholder')}`
   if (!form.unlimitedQuota) {
     const points = Number(form.remainQuota)
     if (!Number.isInteger(points) || points < 0) return `${t('keyQuota')}: ${t('quotaPointsPlaceholder')}`
@@ -582,27 +588,33 @@ function keyFormError(form: KeyForm, t: Translator): string | null {
 function KeyCard(props: {
   form: KeyForm
   groups: Record<string, string>
+  groupRatios: Record<string, number>
   t: Translator
   readOnly: boolean
   submit: (form: KeyForm) => Promise<{ ok: boolean, error?: string }>
   onCancel: () => void
   onDone: () => void
 }): JSX.Element {
-  const { form: initial, groups, t, submit, onCancel, onDone } = props
+  const { form: initial, groups, groupRatios, t, submit, onCancel, onDone } = props
   const [form, setForm] = useState<KeyForm>(initial)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const onChange = (changes: Partial<KeyForm>): void => setForm((current) => ({ ...current, ...changes }))
 
   const apply = async (): Promise<void> => {
-    const problem = keyFormError(form, t)
+    // An empty key name falls back to the selected group's name.
+    const group = form.group.trim()
+    const name = form.name.trim() || group
+    const problem = keyFormError(form, t, name, group)
     if (problem !== null) {
       setError(problem)
       return
     }
+    const effective: KeyForm = { ...form, name, group }
+    if (name !== form.name || group !== form.group) onChange({ name, group })
     setBusy(true)
     setError(null)
-    const result = await submit(form)
+    const result = await submit(effective)
     setBusy(false)
     if (result.ok) onDone()
     else setError(t('actionFail')(String(result.error ?? '?')))
@@ -626,7 +638,7 @@ function KeyCard(props: {
           <MenuSelect
             value={form.group}
             placeholder={t('keyGroupEmptyOption')}
-            items={Object.entries(groups).map(([name, description]) => ({ id: name, label: description ? `${name}（${description}）` : name }))}
+            items={Object.entries(groups).map(([name, description]) => ({ id: name, label: groupOptionLabel(name, groupRatios[name], description) }))}
             disabled={busy}
             onSelect={(id) => onChange({ group: id })}
           />

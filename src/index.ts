@@ -228,6 +228,13 @@ async function keysResponse(): Promise<Response> {
       if (name.trim()) groups[name] = String(description ?? '')
     }
   }
+  // Per-group billing ratios for the key editor's group selector labels.
+  const groupRatios: Record<string, number> = {}
+  if (pricing) {
+    for (const [name, ratio] of Object.entries(pricing.groupRatio)) {
+      if (name.trim() && Number.isFinite(ratio)) groupRatios[name] = ratio
+    }
+  }
   return json({
     ok: true,
     account: self
@@ -237,6 +244,7 @@ async function keysResponse(): Promise<Response> {
         }
       : null,
     groups,
+    groupRatios,
     keys: tokens.map((t) => keySummary(t, {
       selectedName: section.selectedKeyName,
       groupRatio: groupRatioOf(pricing, t.group || groupOf(self)),

@@ -375,3 +375,9 @@
 - `tests/pricing.test.ts` 的 pricing fixture 的分组名（v0.5.0 起借用真实分组名、倍率同真实参数）改为中性 `budget`/0.6。
 - WORKLOG 中真实 key 名改为「目标 key」。`docs/local.md` 为 gitignored 本机备忘，不受影响。
 - 复验：`git grep` 全跟踪文件对专名/真实 key 名/用户 ID/面板地址/真实余额快照零命中（dashboard fixture 余额同步改值）；118/118 全绿。
+
+### 11. key 编辑器分组选项与名称回退（操作者反馈）
+
+- 分组选项展示格式「分组名 倍率 (描述)」（如 claude-stable 0.65x (高智高缓，稳定)）：宿主 `/keys` 响应新增 `groupRatios`（pricing.groupRatio 过滤后透传），客户端 `groupOptionLabel`（format.ts，缺倍率/描述的分组自动省略对应段）；MenuSelect 锚点与选项同步该格式。mock（default 1x / vip 0.8x）与真实面板（claude-stable 0.65x，与操作者示例逐字一致）双验证。
+- key 名称留空回退分组名：KeyCard.apply 内 `name = form.name.trim() || form.group.trim()`，回退值回填表单（失败卡保持时所见即所得）；分组为空时仍报「请选择分组」（此时名称无从回退）。keyFormError 签名改为接收生效 name/group。mock 验证：空名创建 → key 命名为所选分组；编辑态清空名称应用 → 回退为分组名。
+- 新增 tests/format.test.ts（groupOptionLabel 矩阵）；121/121 全绿。

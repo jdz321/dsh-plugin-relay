@@ -24,6 +24,8 @@ Experience-polish release; no data-format changes (the `relay` namespace schema 
 - **dsh primitives everywhere**: buttons, switches, pills, tags, state dots, modals, and dropdowns now come from `@deepseek-ai/dsh-client-ui-primitives` (host-supplied through the frozen module table at runtime — kept as a bare external require; types come from the npm package pinned to the host-matching version as a devDependency). All dropdowns are one `MenuSelect` wrapper (anchor + chevron + portaled `Menu`, the official LanguageRow idiom) — including the key-group selector and the log filters.
 - **Dashboard cards sit four-in-a-row** at the settings-dialog width (numeric font and padding compacted; two-per-row under 480 px viewports).
 - **Log filters are two clean rows** — the time range spans its own row, the three dropdowns + query/reset share the second — and the three dropdown placeholders are per-field again (全部模型 / 全部密钥 / 全部分组; previously all three read "选择分组…").
+- **Key editor group options carry billing ratios**: options render as 「name ratio (description)」 — e.g. `claude-stable 0.65x (高智高缓，稳定)` — with pieces the panel does not report dropped; the host now ships per-group ratios in the `/keys` payload.
+- **Empty key name falls back to the group name**: applying a create/edit card with a blank name field names the key after its selected group.
 - Status messages render as `role="status" aria-live="polite"` regions.
 
 ### Removed
