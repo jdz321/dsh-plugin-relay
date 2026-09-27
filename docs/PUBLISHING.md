@@ -70,7 +70,7 @@ npm publish        # prepublishOnly 会先跑 typecheck + build
 - [ ] 主流模型发布潮后也可手动跑 `npm run preset:fetch`（读 `.dsh-home` 的面板地址与 models.dev，全程无凭据），diff 产物 `src/knowledge-preset.generated.ts` 并随代码一起提交。
 - [ ] 生成文件头部只允许计数信息——**不得**出现面板地址、账号等任何身份信息。
 
-## 8. 发版节奏（后续版本，自动化后）
+## 8. 发版节奏（后续版本，自动化后；commit 由开发会话执行，push 一律由维护者确认审计后手动完成）
 
 1. 改代码 → `npm run typecheck && npm test && npm run build` 全绿（CI 会在 push/PR 时自动跑同一套）。
 2. `CHANGELOG.md` 追加条目；package.json 升语义化版本。

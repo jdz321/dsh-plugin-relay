@@ -11,8 +11,11 @@
 3. **凡手工启动 dsh，命令必须内联 `DSH_HOME=<隔离目录绝对路径>`**。漏了它会回退 `~/.dsh`——等于把操作者自己的 dsh 跑起来。`npm start`（`scripts/dev.js`）已强制锚定仓库 home、**故意忽略**外部 `DSH_HOME`，这是特性不是 bug。dev.js 启动后 dsh 会自动开系统默认浏览器，属已知副作用。
 4. **仓库内的 `.dsh-home/` 若存在，可能是操作者的真实在用配置**（真实账号与真实 key；虽被 gitignore，但不是测试沙盒）。不要「顺手恢复/重置/清洗」它；任何写入前先 Read 全文确认内容；改了什么要明确报告。**测试一律用从零创建的隔离 home，不用真实 home。**
 5. **密钥边界**：中转站访问令牌只存 settings namespace 的 secret 字段（接口层自动脱敏）；API key 明文只写 `.dsh-home/.credentials.yaml`（0600）。任何 HTTP 响应、日志、测试断言、文档、截图、**会话工具输出**都不得出现令牌值或 `sk-` 明文。**测试信息（真实面板地址、账号、key 名称、余额）一律不入 git**——`.gitignore` 已排除 `.dsh-home/`、`.tmp/`、`lib/`、`*.log`、`docs/local.md`，别把临时产物写到其它路径。**本机/账号相关的私密信息统一记录在 `docs/local.md`（已 gitignore）**，公开文档不得携带。
-6. **仓库边界**：不修改仓库外的任何文件。未经操作者要求不要 commit。
-7. **外网直连慢或失败**（GitHub / npm / models.dev）时按操作者环境配置代理（`https_proxy` / `http_proxy`）；能力初值查询（↻）经宿主路由代理 models.dev，宿主进程要带代理 env 才拉得到。
+6. **仓库边界**：不修改仓库外的任何文件。未经操作者要求不要 commit；push 一律由操作者执行。
+7. **外网直连慢或失败**（GitHub / npm / models.dev）时按操作者环境配置代理（`https_proxy` / `http_proxy`）；models.dev 拉取（`preset:fetch` 脚本与「刷新预置」）在宿主/脚本侧进行，进程要带代理 env 才拉得到。
+8. **无人值守运行**：开发会话通常无人值守——不要中途提问；拿不准的事实读 submodule 源码或
+   联网查证，禁止编造；设计决策与对任务书的偏离记录进最终报告与 WORKLOG。任务书
+   （docs/SPEC-*.md）是验收契约：标注【要求】的条目必须达成，【建议】可自主偏离但须说明理由。
 
 ## 1. 项目定位
 
@@ -64,6 +67,7 @@ npm install        # @deepseek-ai/dsh 是 devDependency；运行时零 dependenc
 npm run typecheck  # tsc --noEmit
 npm run build      # tsdown → lib/index.js（宿主 ESM）+ lib/client.js（浏览器包裹产物）
 npm test           # vitest run（mock 面板 + fake-settings，一律不读写真实 .dsh-home）
+                   # 注意：先 npm run build 再 npm test——build-shape 测试读取 lib/ 产物
 npm start          # 开发启动：dsh web --port 3098，DSH_HOME 强制 = <仓库>/.dsh-home；--dsh-home <dir> / --port <n> 可覆盖
 npm run preset:fetch   # 拉「面板公开 pricing ∪ models.dev」重新生成 src/knowledge-preset.generated.ts（纯 codegen，不 build——产物同步走手动 build / prepublishOnly / CI；脚本经 scripts/ts-resolver.mjs 直跑 src，需 Node ≥22.18）
 ```
@@ -133,7 +137,13 @@ DSH_HOME="$PWD/.dsh-home" node_modules/.bin/dsh plugin --profile web add "$PWD"
 
 - `npm test`（vitest）：pricing/relay（mock 面板三种方言+vendors）、catalog（name=id、合并保留）、route-config（能力合并/删除/修订守卫重试/同步保留）、capabilities（models.dev 三态映射、缓存单飞、refresh 绕缓存/失败抛错/单飞）、knowledge（含预置层派生：同名覆盖/并集匹配/近似）、knowledge-preset（fixture：白名单/面板规范化/丢弃/并集/release_date 窗口）、capability-ops（定向 ops 路径形状、删除真实生效、重放一次写、坏条目整批拒绝）、capability-draft（entryFromDraft/parseContextWindow 矩阵，K=1024）、build-shape（**vm 沙箱真实加载 client 产物**：捕获 `__ModuleLoader__.load` 定义、调 factory 断言 apply/inject 导出面与 require 白名单——minify 会改写字符串形态，勿用 grep 断言；宿主 ESM externals；**交付物历史专名哨兵零命中审计（哨兵明文见 tests/build-shape.test.ts）**）、dev-home。
 - **隔离 home 的正确做法**：`mkdir` 新目录后 `DSH_HOME=<新目录> node_modules/.bin/dsh plugin --profile web add "$PWD"` 从零安装。**不要 `cp -R` 复制现成 home**（profile bundle 解析会断）。
-- 浏览器验收：隔离实例（`node scripts/dev.js --dsh-home <临时目录> --port 3198 --no-open`）+ mock 面板（`node .tmp/run-mock.mjs <port>`，`tests/mock-relay.ts` 支持固定端口）+ browser-use / web-gui-tester 技能（若 IAB 输入管线失效，可用本机 Chrome headless + 零依赖 CDP 直驱 `Input.dispatchMouseEvent` 兜底）。走查清单：六 Tab 渲染；连接保存落盘；keys 行↔卡（一次一张卡、应用即写、失败不收卡、Modal 删除、启用 Switch）；Use 后 active 标签即时出现（竞态回归）；模型表三计价；看板四卡一行（getBoundingClientRect 断言同行）；日志两行筛选不叠压 + 三个下拉占位文案 + MenuSelect 开/选/关；能力页：预置折叠区可搜、平台卡收起/展开、1M/256K 换算与非法拒绝、完成即存 → **settings.yaml 落盘断言**（含目录删除真实生效）、刷新预置、无全局保存按钮；禁用 key 警告；**中英两种界面语言各走查一遍**。**注意：dsh 设置对话框会拦截 playwright locator 的指针点击（actionability 超时），DOM 快照可用；点按钮用 cua 坐标或 dom_cua node 路径，且点击可能被吞，要点后验证状态再重试。**
+- 浏览器验收：隔离实例（`node scripts/dev.js --dsh-home <临时目录> --port 3198 --no-open`）+ mock 面板（`node .tmp/run-mock.mjs <port>`，`tests/mock-relay.ts` 支持固定端口）+ browser-use / web-gui-tester 技能（若 IAB 输入管线失效，可用本机 Chrome headless + 零依赖 CDP 直驱 `Input.dispatchMouseEvent` 兜底）。走查清单：六 Tab 渲染；连接保存落盘；keys 行↔卡（一次一张卡、应用即写、失败不收卡、Modal 删除、启用 Switch）；Use 后 active 标签即时出现（竞态回归）；模型表三计价；看板四卡一行（getBoundingClientRect 断言同行）；日志两行筛选不叠压 + 三个下拉占位文案 + MenuSelect 开/选/关；能力页：预置折叠区可搜、平台卡收起/展开、1M/256K 换算与非法拒绝、完成即存 → **settings.yaml 落盘断言**（含目录删除真实生效）、刷新预置、无全局保存按钮；禁用 key 警告；**中英两种界面语言各走查一遍**。**注意：dsh 设置对话框会拦截 playwright locator 的指针点击（actionability 超时），DOM 快照可用；点按钮用 cua 坐标或 dom_cua node 路径，且点击可能被吞，要点后验证状态再重试。** 更多实测坑：**scrollIntoView 平滑滚动会让测量
+  坐标过期**——用 `behavior:'instant'` 滚动、沉降后复测并对 `elementFromPoint` 校验命中再点；
+  **`<details>` 折叠内容与对话框裁剪会让元素不可命中**（有布局但 elementFromPoint 不中），
+  需逐候选评分后再点；管道命令记得 `set -o pipefail`（否则脚本失败被 tee 吞掉）。
+- **多面板**：起两个 mock 实例（`node .tmp/run-mock.mjs <port>` 各一份）覆盖「多站同时生效」。
+- **真实面板写路径的临时 key 约定**：仅允许一次性临时 key（名称前缀 `dsh-temp-`）走
+  创建→编辑→删除闭环，用后即删、面板无残留；既有 key 一律不碰。
 - **涉及真实账号时**：只读调用可随意；`/use` 等改写操作只在隔离 home 测；真实 home 只做只读确认；任何真实账号信息不入报告、不入 git。
 
 ## 7. 改动收尾清单
