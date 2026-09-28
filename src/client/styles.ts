@@ -53,7 +53,10 @@ export const cssText = `
 .${CSS_PREFIX}_formGrid{gap:10px 16px;display:grid;grid-template-columns:1fr 1fr}
 .${CSS_PREFIX}_editorFooter{align-items:center;gap:8px;justify-content:flex-end;display:flex}
 .${CSS_PREFIX}_footerSide{margin-right:auto}
-.${CSS_PREFIX}_editorFooter button,.${CSS_PREFIX}_presetToolbar button,.${CSS_PREFIX}_capActions button{white-space:nowrap}
+.${CSS_PREFIX}_editorFooter button,.${CSS_PREFIX}_presetToolbar button,.${CSS_PREFIX}_capActions button,.${CSS_PREFIX}_head button{white-space:nowrap}
+/* Head buttons never wrap; the title block absorbs the squeeze instead. */
+.${CSS_PREFIX}_head>div:first-child{min-width:0}
+.${CSS_PREFIX}_head button{flex:none}
 .${CSS_PREFIX}_cardMsg{margin:0}
 .${CSS_PREFIX}_checkRow{align-items:center;gap:6px;display:flex}
 .${CSS_PREFIX}_radioRow{align-items:center;gap:12px;flex-wrap:wrap;display:flex}
@@ -80,6 +83,9 @@ export const cssText = `
 .${CSS_PREFIX}_chartGrid{stroke:var(--dsw-alias-border-l4);stroke-dasharray:3 3}
 .${CSS_PREFIX}_chartText{fill:var(--dsw-alias-label-tertiary);font-size:10px}
 .${CSS_PREFIX}_chartBar:hover{opacity:.85}
+.${CSS_PREFIX}_chartLine{fill:none;stroke:var(--dsw-alias-label-primary);stroke-width:1.5;stroke-linejoin:round;stroke-linecap:round;pointer-events:none}
+.${CSS_PREFIX}_chartPoint{fill:var(--dsh-alias-label-primary);cursor:default}
+.${CSS_PREFIX}_chartOthers{fill:#93a8b8}
 .${CSS_PREFIX}_chartLegend{flex-wrap:wrap;gap:4px 10px;display:flex}
 .${CSS_PREFIX}_chartLegendItem{font:inherit;font-size:11px;color:var(--dsw-alias-label-secondary);background:none;border:none;cursor:pointer;align-items:center;gap:5px;display:inline-flex;padding:2px 0;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .${CSS_PREFIX}_chartLegendOff{color:var(--dsw-alias-label-dimmed);text-decoration:line-through}
@@ -142,11 +148,13 @@ export const cssText = `
 .${CSS_PREFIX}_presetFilter{height:28px;font-size:12px;flex:1 1 auto;min-width:0}
 .${CSS_PREFIX}_presetToolbar button{flex:none}
 
-/* Panel detail page: back + name + status + test bar. */
-.${CSS_PREFIX}_detailHead{align-items:center;gap:8px;display:flex}
-.${CSS_PREFIX}_detailTitle{color:var(--dsw-alias-label-primary);font-size:14px;font-weight:600;overflow-wrap:anywhere}
-.${CSS_PREFIX}_detailHead .${CSS_PREFIX}_formActions{margin-left:auto}
-.${CSS_PREFIX}_panelRow{cursor:default}
+/* Connection-tab accordion (v0.6.1): one collapsible item per panel. */
+.${CSS_PREFIX}_panelItem{border:.5px solid var(--dsw-alias-border-l4);border-radius:10px;display:flex;flex-direction:column}
+.${CSS_PREFIX}_panelItemOpen{border-color:var(--dsw-alias-brand-primary)}
+.${CSS_PREFIX}_panelRowHead{align-items:center;gap:10px;padding:8px 12px;display:flex}
+.${CSS_PREFIX}_panelChevron{color:var(--dsw-alias-label-tertiary);flex:none;transition:transform .15s}
+.${CSS_PREFIX}_panelChevronOpen{transform:rotate(180deg)}
+.${CSS_PREFIX}_panelBody{border-top:.5px solid var(--dsw-alias-border-l4);flex-direction:column;gap:12px;padding:12px;display:flex}
 .${CSS_PREFIX}_panelMain{font:inherit;text-align:left;background:none;border:none;color:inherit;padding:0;flex-direction:column;gap:2px;min-width:0;flex:1 1 0;display:flex;cursor:pointer}
 .${CSS_PREFIX}_panelMain:hover .${CSS_PREFIX}_keyName{color:var(--dsw-alias-brand-primary)}
 
@@ -154,4 +162,9 @@ export const cssText = `
 .${CSS_PREFIX}_capPanelGroup{flex-direction:column;gap:6px;display:flex}
 .${CSS_PREFIX}_capPanelHead{align-items:baseline;gap:8px;flex-wrap:wrap;display:flex;margin-top:4px}
 .${CSS_PREFIX}_capPanelName{color:var(--dsw-alias-label-primary);font-size:13px;font-weight:600}
+/* Coverage indicator segments (R5): each source bucket filters the list. */
+.${CSS_PREFIX}_capFilterSeg{font:inherit;font-size:11px;line-height:16px;color:var(--dsw-alias-label-tertiary);background:none;border:none;cursor:pointer;padding:1px 5px;border-radius:5px}
+.${CSS_PREFIX}_capFilterSeg:hover{color:var(--dsw-alias-label-primary);background:var(--dsw-alias-interactive-bg-hover)}
+.${CSS_PREFIX}_capFilterSegActive{color:var(--dsw-alias-brand-primary);font-weight:600;background:var(--dsw-alias-interactive-bg-hover)}
+.${CSS_PREFIX}_capFilterClear{font:inherit;font-size:11px;line-height:16px;color:var(--dsw-alias-brand-primary);background:none;border:none;cursor:pointer;padding:1px 5px;text-decoration:underline}
 `

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
-import { keyRefForPanelId, normalizePanel, panelsOf, uniqueKeyRef } from '../src/panels.js'
-import { createPanel, deletePanel, PanelRequestError, updatePanel } from '../src/panels-ops.js'
+import { keyRefForPanelId, normalizePanel, panelSummaries, panelsOf, uniqueKeyRef } from '../src/panels.js'
+import { createPanel, deletePanel, PanelRequestError } from '../src/panels-ops.js'
 import type { CredentialsService, RouteProfile } from '../src/types.js'
 import { FakeSettings } from './fake-settings.js'
 
@@ -74,26 +74,6 @@ describe('createPanel', () => {
   })
 })
 
-describe('updatePanel', () => {
-  it('updates targeted fields and keeps the id immutable', async () => {
-    const { settings } = await setup()
-    await createPanel(settings, { id: 'a', baseUrl: 'https://old', userId: 1, accessToken: 't1' })
-    await updatePanel(settings, { panel: 'a', baseUrl: 'https://new/', userId: 7 })
-    const panel = panelsOf(settings.get('relay')).find((p) => p.id === 'a')!
-    expect(panel.baseUrl).toBe('https://new')
-    expect(panel.userId).toBe(7)
-    expect(panel.accessToken).toBe('t1')
-    await expect(updatePanel(settings, { panel: 'a', accessToken: '' })).resolves.toMatchObject({ accessToken: 't1' })
-  })
-
-  it('404s on unknown panels and rejects bad user ids', async () => {
-    const { settings } = await setup()
-    await expect(updatePanel(settings, { panel: 'ghost' })).rejects.toMatchObject({ status: 404 })
-    await createPanel(settings, { id: 'a' })
-    await expect(updatePanel(settings, { panel: 'a', userId: -3 })).rejects.toThrow(/用户 ID/)
-  })
-})
-
 describe('deletePanel', () => {
   it('removes the panel, its overrides group, its route, and its credential ref', async () => {
     const { settings, credentials, unsetCalls } = await setup()
@@ -141,5 +121,63 @@ describe('deletePanel', () => {
   it('404s on unknown panels', async () => {
     const { settings, credentials } = await setup()
     await expect(deletePanel(settings, credentials, 'ghost')).rejects.toMatchObject({ status: 404 })
+  })
+})
+
+describe('panelSummaries (v0.6.1 connection rows — config state, no I/O)', () => {
+  it('carries overrideCount and defaultModelTarget and NO account field', async () => {
+    const { settings } = await setup()
+    await settings.seed('relay', {
+      panels: {
+        a: { id: 'a', baseUrl: 'https://a.example.com', relayKind: 'new-api', accessToken: 't', userId: 9, keyRef: 'RELAY_API_KEY_A', selectedKeyName: 'k' },
+        incomplete: { id: 'incomplete', baseUrl: '', userId: 0, keyRef: 'RELAY_API_KEY_INCOMPLETE', selectedKeyName: '' },
+      },
+      capabilityOverrides: { a: { m1: { input: ['text'] }, m2: { input: ['text'] } }, other: { x: { input: ['text'] } } },
+    })
+    await settings.seed('llm-pi-ai', {
+      providers: { a: { models: [{ id: 'm1' }, { id: 'm2' }, { id: 'm3' }] } as unknown as RouteProfile },
+    })
+    const summaries = panelSummaries({
+      relay: settings.get('relay'),
+      piAi: settings.get('llm-pi-ai'),
+      defaultModel: { provider: 'a' },
+      routeModelsCount: (route) => route === 'a' ? 3 : 0,
+    })
+    const a = summaries.find((summary) => summary.id === 'a')!
+    expect(a).toMatchObject({
+      host: 'a.example.com',
+      configured: true,
+      tokenConfigured: true,
+      userId: 9,
+      selectedKeyName: 'k',
+      modelCount: 3,
+      overrideCount: 2,
+      defaultModelTarget: true,
+    })
+    const incomplete = summaries.find((summary) => summary.id === 'incomplete')!
+    expect(incomplete.configured).toBe(false)
+    expect(incomplete.missing).toBe('baseUrl')
+    expect(incomplete.defaultModelTarget).toBe(false)
+    // the account line is lazy since v0.6.1 — the summary carries no account
+    for (const summary of summaries) {
+      expect(Object.hasOwn(summary, 'account')).toBe(false)
+    }
+  })
+
+  it('defaultModelTarget stays false when the namespace is absent or mismatched', () => {
+    const summaries = panelSummaries({
+      relay: { panels: { a: { id: 'a', baseUrl: 'https://a', userId: 1, keyRef: 'R', selectedKeyName: '' } } },
+      piAi: {},
+      defaultModel: undefined,
+      routeModelsCount: () => 0,
+    })
+    expect(summaries[0]!.defaultModelTarget).toBe(false)
+    const mismatched = panelSummaries({
+      relay: { panels: { a: { id: 'a', baseUrl: 'https://a', userId: 1, keyRef: 'R', selectedKeyName: '' } } },
+      piAi: {},
+      defaultModel: { provider: 'b' },
+      routeModelsCount: () => 0,
+    })
+    expect(mismatched[0]!.defaultModelTarget).toBe(false)
   })
 })

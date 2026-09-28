@@ -1,16 +1,16 @@
 /**
- * The settings section, v0.6.0 shape: the main page has TWO tabs —
- * 「连接」 (the relay-panel list; click a row to open a panel's detail page)
+ * The settings section, v0.6.1 shape: ONE page, TWO tabs — 「连接」 (the
+ * relay-panel accordion; expanding a panel folds its four sub-tabs — keys /
+ * models / dashboard / logs — inline, see panels-tab.tsx + panel-body.tsx)
  * and 「模型能力」 (the capability tab, whose platform section groups by
- * panel). The panel detail page carries the four per-panel tabs (keys /
- * models / dashboard / logs) — see panel-detail.tsx.
+ * panel). openPanelId is the accordion state: which panel is expanded (at
+ * most one); it is NOT remembered across page reloads.
  */
 
 import { useCallback, useEffect, useState, useSyncExternalStore } from 'react'
 
 import { apiGet } from './api.js'
 import { CapabilitiesView, type CapData } from './capabilities.js'
-import { PanelDetail } from './panel-detail.js'
 import { PanelsTab, type PanelSummary } from './panels-tab.js'
 import type { Translator } from './locale.js'
 
@@ -71,15 +71,15 @@ export function RelaySection(props: SectionEnv): JSX.Element {
       .then((body) => setCaps(body as unknown as CapData))
       .catch((err) => setCaps({ ok: false, error: errText(err) }))
   }, [])
-  // Re-pull when the namespace changed (key switches / capability saves) and
-  // when returning from a panel detail page (a key switch may have created
-  // that panel's route) — a stale "not configured" view must not linger.
+  // Re-pull when the namespace changed (key switches / capability saves /
+  // preset refreshes) and when the accordion moves (a key switch inside a
+  // panel may have created that panel's route) — a stale "not configured"
+  // view must not linger.
   useEffect(() => {
     refreshCaps()
   }, [refreshCaps, snapshot.revision, openPanelId])
 
-  const openPanel = openPanelId === null ? null : (panels ?? []).find((panel) => panel.id === openPanelId) ?? null
-  // A panel just deleted from the detail page closes the detail view.
+  // A panel deleted from the accordion collapses it.
   useEffect(() => {
     if (openPanelId !== null && panels !== null && !panels.some((panel) => panel.id === openPanelId)) {
       setOpenPanelId(null)
@@ -105,55 +105,42 @@ export function RelaySection(props: SectionEnv): JSX.Element {
       {message !== null && <div className={message.ok ? 'relay_msg relay_msgOk' : 'relay_msg relay_msgErr'} role="status" aria-live="polite">{message.text}</div>}
       {snapshot.writable === false && <p className="relay_metaLine">{t('readOnlyHint')}</p>}
 
-      {openPanel !== null ? (
-        <PanelDetail
+      <div className="relay_tabs" role="tablist">
+        {tabs.map((entry) => (
+          <button
+            key={entry.id}
+            type="button"
+            role="tab"
+            aria-selected={tab === entry.id}
+            className={tab === entry.id ? 'relay_tab relay_tabActive' : 'relay_tab'}
+            onClick={() => setTab(entry.id)}
+          >
+            {entry.label}
+          </button>
+        ))}
+      </div>
+
+      {tab === 'connection' && (
+        <PanelsTab
           t={t}
-          panel={openPanel}
+          panels={panels}
           readOnly={snapshot.writable === false}
-          onBack={() => {
-            setOpenPanelId(null)
-            refreshPanels()
-          }}
+          busy={panelsBusy}
+          revision={snapshot.revision}
+          refreshPanels={refreshPanels}
+          openPanelId={openPanelId}
+          setOpenPanelId={setOpenPanelId}
           onMessage={setMessage}
         />
-      ) : (
-        <>
-          <div className="relay_tabs" role="tablist">
-            {tabs.map((entry) => (
-              <button
-                key={entry.id}
-                type="button"
-                role="tab"
-                aria-selected={tab === entry.id}
-                className={tab === entry.id ? 'relay_tab relay_tabActive' : 'relay_tab'}
-                onClick={() => setTab(entry.id)}
-              >
-                {entry.label}
-              </button>
-            ))}
-          </div>
+      )}
 
-          {tab === 'connection' && (
-            <PanelsTab
-              t={t}
-              panels={panels}
-              readOnly={snapshot.writable === false}
-              busy={panelsBusy}
-              refreshPanels={refreshPanels}
-              onOpen={setOpenPanelId}
-              onMessage={setMessage}
-            />
-          )}
-
-          {tab === 'capabilities' && (
-            <CapabilitiesView
-              t={t}
-              caps={caps}
-              refreshCaps={refreshCaps}
-              onMessage={setMessage}
-            />
-          )}
-        </>
+      {tab === 'capabilities' && (
+        <CapabilitiesView
+          t={t}
+          caps={caps}
+          refreshCaps={refreshCaps}
+          onMessage={setMessage}
+        />
       )}
     </div>
   )

@@ -1,7 +1,7 @@
 {
   "name": "dsh-plugin-relay",
-  "version": "0.6.0",
-  "description": "DeepSeek Harness (dsh) plugin that routes model traffic through new-api-family relay panels (one-api / new-api / Veloera / done-hub / ...) — several panels at once, each its own model provider: manage panels, create / edit / delete and switch API keys, sync each key's model list with pricing, review usage dashboard and logs, and configure model capabilities from a mainstream-model knowledge base — all from the dsh web settings page",
+  "version": "0.6.1",
+  "description": "DeepSeek Harness (dsh) plugin that routes model traffic through new-api-family relay panels (one-api / new-api / Veloera / done-hub / ...) — several panels at once, each its own model provider: manage panels (accordion with inline keys / models / dashboard / logs tabs), create / edit / delete and switch API keys, sync each key's model list with pricing, review usage dashboard (dual-axis) and logs, and configure model capabilities from a mainstream-model knowledge base — all from the dsh web settings page",
   "type": "module",
   "license": "MIT",
   "repository": {

@@ -3,11 +3,16 @@ import { describe, expect, it } from 'vitest'
 import {
   applyDerivedCapabilities,
   deriveCapabilityFor,
+  diffPreset,
   matchCatalogName,
   normalizeCapabilityEntry,
   normalizeKnowledgeConfig,
+  normalizePresetDelta,
   PRESET_ALIASES,
+  resolvePreset,
+  summarizePresetDelta,
   validateCapabilityEntry,
+  type CatalogEntry,
   type KnowledgeConfig,
   type KnowledgeView,
 } from '../src/knowledge.js'
@@ -293,6 +298,75 @@ describe('applyDerivedCapabilities (route entry rewrite rules)', () => {
   it('passes everything through with an empty knowledge config', () => {
     const models: RouteModelEntry[] = [{ id: 'a', input: ['text'] }, { id: 'b' }]
     expect(applyDerivedCapabilities(models, EMPTY)).toEqual(models)
+  })
+})
+
+describe('preset delta layer (v0.6.1: resolvePreset / diffPreset / normalizePresetDelta)', () => {
+  const baseline: Record<string, CatalogEntry> = {
+    'gpt-6.1': { contextWindow: 400000 },
+    'claude-fable': { contextWindow: 200000 },
+    'deepseek-chat': { contextWindow: 128000 },
+  }
+
+  it('normalizePresetDelta accepts a full delta and drops bad members', () => {
+    expect(normalizePresetDelta(undefined)).toBeUndefined()
+    expect(normalizePresetDelta(null)).toBeUndefined()
+    expect(normalizePresetDelta('junk')).toBeUndefined()
+    // the schemastery-resolved section materializes the key as {} — absent
+    expect(normalizePresetDelta({})).toBeUndefined()
+    expect(normalizePresetDelta({ removed: ['x'] })).toBeUndefined() // no builtAt
+    const delta = normalizePresetDelta({
+      builtAt: 123,
+      removed: ['deepseek-chat', ' ', 42],
+      changed: { 'gpt-6.2': { contextWindow: 500000 }, bad: 'junk', '': { input: ['text'] } },
+    })
+    expect(delta).toEqual({
+      builtAt: 123,
+      removed: ['deepseek-chat'],
+      changed: { 'gpt-6.2': { contextWindow: 500000 } },
+    })
+  })
+
+  it('resolvePreset: no delta → baseline untouched; changed overrides; removed drops', () => {
+    expect(resolvePreset(baseline, undefined)).toBe(baseline)
+    expect(resolvePreset(baseline, normalizePresetDelta({ builtAt: 1 }))).toEqual(baseline)
+    const effective = resolvePreset(baseline, {
+      builtAt: 1,
+      removed: ['claude-fable'],
+      changed: { 'gpt-6.1': { contextWindow: 999 }, 'new-model': { input: ['text'] } },
+    })
+    expect(Object.keys(effective).sort()).toEqual(['deepseek-chat', 'gpt-6.1', 'new-model'])
+    expect(effective['gpt-6.1']).toEqual({ contextWindow: 999 })
+    // a removed name re-added by `changed` comes back (changed wins)
+    const resurrected = resolvePreset(baseline, { builtAt: 1, removed: ['deepseek-chat'], changed: { 'deepseek-chat': { input: ['text'] } } })
+    expect(resurrected['deepseek-chat']).toEqual({ input: ['text'] })
+  })
+
+  it('diffPreset reports added / updated / removed relative to the baseline', () => {
+    const next: Record<string, CatalogEntry> = {
+      'gpt-6.1': { contextWindow: 400000 }, // unchanged
+      'claude-fable': { contextWindow: 256000 }, // updated
+      'new-model': { input: ['text'] }, // added
+      // deepseek-chat gone → removed
+    }
+    const diff = diffPreset(baseline, next)
+    expect(diff.removed).toEqual(['deepseek-chat'])
+    expect(Object.keys(diff.changed).sort()).toEqual(['claude-fable', 'new-model'])
+    // equal-value entries stay OUT of the delta
+    expect(diff.changed['gpt-6.1']).toBeUndefined()
+    // key-order-independent comparison
+    const reordered = diffPreset(baseline, { 'gpt-6.1': { contextWindow: 400000 } })
+    expect(reordered.changed).toEqual({})
+    expect(reordered.removed).toEqual(['claude-fable', 'deepseek-chat'])
+  })
+
+  it('summarizePresetDelta counts added vs updated against the CURRENT baseline', () => {
+    const summary = summarizePresetDelta(baseline, {
+      builtAt: 7,
+      removed: ['claude-fable'],
+      changed: { 'gpt-6.1': { contextWindow: 999 }, 'new-model': { input: ['text'] } },
+    })
+    expect(summary).toEqual({ builtAt: 7, added: 1, updated: 1, removed: 1 })
   })
 })
 

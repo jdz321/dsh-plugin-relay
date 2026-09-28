@@ -44,9 +44,10 @@ describe('host entry', () => {
     expect(hostEntry.name).toBe('relay')
     expect(typeof hostEntry.apply).toBe('function')
     const config = (hostEntry.Config as unknown as (v: unknown) => Record<string, unknown>)({})
-    // v0.6.0: the connection fields live in the panels dict; no legacy flat
-    // route/keyRef base remains (no backward-compat — the plugin is unreleased)
-    expect(Object.keys(config).sort()).toEqual(['capabilityCatalog', 'capabilityOverrides', 'panels'])
+    // v0.6.1: + capabilityPresetDelta (persisted refresh delta); no legacy
+    // flat route/keyRef base remains (no backward-compat — the plugin is
+    // unreleased)
+    expect(Object.keys(config).sort()).toEqual(['capabilityCatalog', 'capabilityOverrides', 'capabilityPresetDelta', 'panels'])
   })
 
   it('marks the nested panel access token as a secret in the schema envelope', () => {
@@ -147,6 +148,7 @@ describe('naming audit (no vendor-specific tokens in the deliverable)', () => {
     'docs/SPEC-0.5.0.md',
     'docs/SPEC-0.5.1.md',
     'docs/SPEC-0.6.0.md',
+    'docs/SPEC-0.6.1.md',
     'docs/PUBLISHING.md',
     'package.json',
   ]

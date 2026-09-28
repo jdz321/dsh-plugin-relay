@@ -1,26 +1,22 @@
 /**
  * The 「数据看板」 tab: balance / today / totals cards plus a stacked
- * per-model bar chart of the last N days (7 / 14 / 30), with a 消耗金额 /
- * Token 量 metric toggle and click-to-hide chart legend. The chart is the
- * hand-written SVG stacked bar (dashboard-chart.tsx) — recharts is gone. The
- * chart palette is read from the shell's design tokens at render time with
- * fixed fallbacks.
+ * per-model bar chart of the last N days (7 / 14 / 30), a 消耗金额 / Token 量
+ * / 双轴 metric toggle, Top-N series folding (v0.6.1: past the 7th model by
+ * window total, everything merges into one grey「其他」series), and a
+ * click-to-hide chart legend (the「其他」series is not hideable — hiding it
+ * would empty the chart). The chart is the hand-written SVG stacked bar
+ * (dashboard-chart.tsx) — recharts is gone. The chart palette is read from
+ * the shell's design tokens at render time with fixed fallbacks.
  */
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Button, Pill } from '@deepseek-ai/dsh-client-ui-primitives'
 
 import { apiGet } from './api.js'
-import { StackedBarChart } from './dashboard-chart.js'
+import { OTHERS_KEY, pivotBuckets, StackedBarChart, TOP_N, topSeries, type ChartMetric, type UsageBucket } from './dashboard-chart.js'
 import type { Translator } from './locale.js'
 
-/** One aggregated cell from GET /api/relay/dashboard. */
-export interface UsageBucket {
-  date: string
-  model: string
-  quota: number
-  tokens: number
-}
+export type { UsageBucket }
 
 export interface DashboardData {
   balanceCny: string | null
@@ -39,7 +35,7 @@ interface DashboardPayload {
   warning?: string
 }
 
-type Metric = 'cny' | 'tokens'
+type Metric = ChartMetric
 
 const DAY_CHOICES = [7, 14, 30] as const
 
@@ -67,19 +63,6 @@ function useChartPalette(seriesCount: number): string[] {
     if (seriesCount <= palette.length) return palette.slice(0, Math.max(1, seriesCount))
     return Array.from({ length: seriesCount }, (_, i) => palette[i % palette.length]!)
   }, [seriesCount])
-}
-
-/** Pivot buckets into one row per date with a column per model. */
-export function pivotBuckets(buckets: readonly UsageBucket[], metric: Metric): { rows: Array<Record<string, string | number>>, models: string[] } {
-  const models = [...new Set(buckets.map((cell) => cell.model))].sort((a, b) => a.localeCompare(b))
-  const byDate = new Map<string, Record<string, string | number>>()
-  for (const cell of buckets) {
-    const row = byDate.get(cell.date) ?? { date: cell.date }
-    row[cell.model] = metric === 'cny' ? Number(cell.quota.toFixed(4)) : cell.tokens
-    byDate.set(cell.date, row)
-  }
-  const rows = [...byDate.values()].sort((a, b) => String(a.date).localeCompare(String(b.date)))
-  return { rows, models }
 }
 
 export function DashboardTab({ t, panel }: DashboardTabProps): JSX.Element {
@@ -111,13 +94,45 @@ export function DashboardTab({ t, panel }: DashboardTabProps): JSX.Element {
     refresh(days)
   }, [refresh, days])
 
-  const { rows, models } = useMemo(() => pivotBuckets(data?.buckets ?? [], metric), [data, metric])
-  const palette = useChartPalette(models.length)
-  const visible = useMemo(() => models.filter((model) => !hidden.has(model)), [models, hidden])
+  // Ranking metric: the bars' axis (dual mode stacks spend).
+  const rankMetric: 'cny' | 'tokens' = metric === 'tokens' ? 'tokens' : 'cny'
+  const { rows: rankRows, models: allModels } = useMemo(() => pivotBuckets(data?.buckets ?? [], rankMetric), [data, rankMetric])
+  const { kept, others } = useMemo(() => topSeries(allModels, rankRows), [allModels, rankRows])
+  // Stack rows in the kept order + the merged 「其他」 column.
+  const series = useMemo(() => [...kept, ...(others.length ? [OTHERS_KEY] : [])], [kept, others])
+  const rows = useMemo(() => rankRows.map((row) => {
+    if (!others.length) return row
+    const merged: Record<string, string | number> = { date: row.date }
+    let othersTotal = 0
+    for (const model of kept) merged[model] = row[model] ?? 0
+    for (const model of others) othersTotal += Number(row[model] ?? 0)
+    merged[OTHERS_KEY] = othersTotal
+    return merged
+  }), [rankRows, kept, others])
+  // Token totals per date for the dual-axis line — the FULL daily total,
+  // independent of legend hiding.
+  const tokenTotals = useMemo(() => {
+    const byDate = new Map<string, number>()
+    for (const cell of data?.buckets ?? []) byDate.set(cell.date, (byDate.get(cell.date) ?? 0) + cell.tokens)
+    return rows.map((row) => byDate.get(String(row.date)) ?? 0)
+  }, [data, rows])
+  const palette = useChartPalette(series.length)
+  const visible = useMemo(() => series.filter((model) => model === OTHERS_KEY || !hidden.has(model)), [series, hidden])
   const lookup = useCallback((date: string, model: string): { quota: number, tokens: number } | null => {
+    if (model === OTHERS_KEY) {
+      let quota = 0
+      let tokens = 0
+      for (const cell of data?.buckets ?? []) {
+        if (cell.date === date && others.includes(cell.model)) {
+          quota += cell.quota
+          tokens += cell.tokens
+        }
+      }
+      return { quota: Number(quota.toFixed(4)), tokens }
+    }
     const cell = (data?.buckets ?? []).find((bucket) => bucket.date === date && bucket.model === model)
     return cell ?? null
-  }, [data])
+  }, [data, others])
   // Rescale when visibility changes: only visible series count toward the max.
   const yMax = useMemo(() => {
     let max = 0
@@ -144,6 +159,8 @@ export function DashboardTab({ t, panel }: DashboardTabProps): JSX.Element {
       </div>
     )
   }
+
+  const leftMetric: 'cny' | 'tokens' = metric === 'tokens' ? 'tokens' : 'cny'
 
   return (
     <div className="relay_tabPane">
@@ -187,30 +204,37 @@ export function DashboardTab({ t, panel }: DashboardTabProps): JSX.Element {
                     {t('dashDays')(choice)}
                   </Pill>
                 ))}
-                {(['cny', 'tokens'] as const).map((candidate) => (
+                {(['cny', 'tokens', 'dual'] as const).map((candidate) => (
                   <Pill
                     key={candidate}
                     active={metric === candidate}
                     onClick={() => setMetric(candidate)}
                   >
-                    {candidate === 'cny' ? t('dashMetricCny') : t('dashMetricTokens')}
+                    {candidate === 'cny' ? t('dashMetricCny') : candidate === 'tokens' ? t('dashMetricTokens') : t('dashMetricDual')}
                   </Pill>
                 ))}
               </div>
             </div>
-            {rows.length === 0 || visible.length === 0 ? <div className="relay_empty">{t('dashEmpty')}</div> : (
+            {rows.length === 0 ? <div className="relay_empty">{t('dashEmpty')}</div> : (
               <>
                 <StackedBarChart
                   rows={rows}
-                  models={models}
+                  models={series}
                   visible={visible}
                   colors={palette}
-                  metric={metric}
+                  metric={leftMetric}
+                  dual={metric === 'dual'}
+                  tokenTotals={metric === 'dual' ? tokenTotals : undefined}
                   yMax={yMax}
                   lookup={lookup}
                 />
                 <div className="relay_chartLegend">
-                  {models.map((model, index) => (
+                  {series.map((model, index) => model === OTHERS_KEY ? (
+                    <span key={model} className="relay_chartLegendItem" title={others.join(', ')}>
+                      <span className="relay_chartSwatch relay_chartOthers" />
+                      {t('dashOthers')(others.length)}
+                    </span>
+                  ) : (
                     <button
                       key={model}
                       type="button"
@@ -222,6 +246,12 @@ export function DashboardTab({ t, panel }: DashboardTabProps): JSX.Element {
                       {model}
                     </button>
                   ))}
+                  {metric === 'dual' && (
+                    <span className="relay_chartLegendItem">
+                      <svg width="18" height="10" aria-hidden="true"><path d="M1 5 H17" className="relay_chartLine" /></svg>
+                      {t('dashTokensLine')}
+                    </span>
+                  )}
                 </div>
               </>
             )}

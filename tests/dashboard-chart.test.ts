@@ -1,6 +1,17 @@
 import { describe, expect, it } from 'vitest'
 
-import { niceScale, stackedColumns, xLabelIndices } from '../src/client/dashboard-chart.js'
+import {
+  linePath,
+  linePoints,
+  niceScale,
+  OTHERS_KEY,
+  pivotBuckets,
+  stackedColumns,
+  TOP_N,
+  topSeries,
+  xLabelIndices,
+  type UsageBucket,
+} from '../src/client/dashboard-chart.js'
 
 describe('niceScale (Y ticks: 4-6, integers from 1 up)', () => {
   it('picks 1-2-5 steps that cover the max', () => {
@@ -84,5 +95,79 @@ describe('stackedColumns (pixel geometry)', () => {
     expect(stackedColumns({ rows: [], models: ['a'], width: 100, height: 100, yMax: 100 })).toEqual([])
     expect(stackedColumns({ rows, models: [], width: 100, height: 100, yMax: 100 })).toEqual([])
     expect(stackedColumns({ rows, models: ['a'], width: 0, height: 100, yMax: 100 })).toEqual([])
+  })
+})
+
+describe('linePath / linePoints (dual-axis token line geometry)', () => {
+  it('centers each vertex in its band and scales against yMax', () => {
+    const path = linePath([0, 100, 200], 300, 100, 200)
+    // bands of 100 → centers at 50 / 150 / 250; y = 100 - value * 0.5
+    expect(path).toBe('M50,100 L150,50 L250,0')
+    expect(linePoints([0, 100, 200], 300, 100, 200)).toEqual([
+      { x: 50, y: 100 },
+      { x: 150, y: 50 },
+      { x: 250, y: 0 },
+    ])
+  })
+
+  it('clamps negative values at the baseline', () => {
+    expect(linePath([-5, 5], 100, 100, 100)).toBe('M25,100 L75,95')
+  })
+
+  it('degenerates safely', () => {
+    expect(linePath([], 100, 100, 100)).toBe('')
+    expect(linePath([1], 0, 100, 100)).toBe('')
+    expect(linePath([1], 100, 100, 0)).toBe('')
+    expect(linePoints([], 100, 100, 100)).toEqual([])
+  })
+})
+
+describe('topSeries + pivotBuckets (Top-N fold with stable ranking)', () => {
+  const buckets: UsageBucket[] = []
+  // 9 models; totals over 2 days: m1=30, m2=21, m3=12, tie=10, m4=3, m5=2, m6=1, m7=0, m8=0
+  const totals: Record<string, number> = { m1: 30, m2: 21, m3: 12, 'tie-a': 10, 'tie-b': 10, m4: 3, m5: 2, m6: 1, m7: 0, m8: 0 }
+  for (const [model, total] of Object.entries(totals)) {
+    buckets.push({ date: '2026-09-01', model, quota: total / 2, tokens: total })
+    buckets.push({ date: '2026-09-02', model, quota: total / 2, tokens: total })
+  }
+
+  it('keeps the top N by window total and merges the rest', () => {
+    const { rows, models } = pivotBuckets(buckets, 'cny')
+    expect(models).toHaveLength(10)
+    const { kept, others } = topSeries(models, rows, 3)
+    expect(kept).toEqual(['m1', 'm2', 'm3'])
+    expect(others.sort()).toEqual(['m4', 'm5', 'm6', 'm7', 'm8', 'tie-a', 'tie-b'])
+  })
+
+  it('breaks total ties by name ascending (stable fold)', () => {
+    const { rows, models } = pivotBuckets(buckets, 'cny')
+    const { kept, others } = topSeries(models, rows, 4)
+    // tie-a and tie-b share 10; tie-a wins the 4th slot by name
+    expect(kept).toEqual(['m1', 'm2', 'm3', 'tie-a'])
+    expect(others).toContain('tie-b')
+  })
+
+  it('the default N is TOP_N (7) and fewer models fold nothing', () => {
+    const { rows, models } = pivotBuckets(buckets, 'cny')
+    const { kept, others } = topSeries(models, rows)
+    expect(TOP_N).toBe(7)
+    expect(kept).toHaveLength(7)
+    expect(others).toHaveLength(3)
+    const small = topSeries(['a', 'b'], [{ a: 1, b: 2 }], 7)
+    expect(small.others).toEqual([])
+  })
+
+  it('pivotBuckets: token metric reads tokens, cny rounds quota to 4 decimals', () => {
+    const { rows: cnyRows, models } = pivotBuckets([{ date: 'd', model: 'x', quota: 0.123456, tokens: 5 }], 'cny')
+    expect(models).toEqual(['x'])
+    expect(Number(cnyRows[0]!.x)).toBe(0.1235)
+    const { rows: tokenRows } = pivotBuckets([{ date: 'd', model: 'x', quota: 0.123456, tokens: 5 }], 'tokens')
+    expect(tokenRows[0]!.x).toBe(5)
+    // dual ranks on spend (the bars' axis)
+    expect(pivotBuckets([{ date: 'd', model: 'x', quota: 1, tokens: 999 }], 'dual').rows[0]!.x).toBe(1)
+  })
+
+  it('OTHERS_KEY is never a plausible model id', () => {
+    expect(OTHERS_KEY).toBe('__others__')
   })
 })

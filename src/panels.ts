@@ -101,6 +101,78 @@ export function panelHost(baseUrl: string): string {
   }
 }
 
+/**
+ * One connection-list row (v0.6.1): pure config state — NO account I/O (the
+ * client fills that lazily via GET /api/relay/account). Carries the delete
+ * Modal's warning inputs: the panel's override-group entry count and whether
+ * dsh's default model points at this panel.
+ */
+export interface PanelSummary {
+  id: string
+  baseUrl: string
+  host: string
+  relayKind: string
+  configured: boolean
+  missing: string | null
+  tokenConfigured: boolean
+  userId: number | null
+  keyRef: string
+  selectedKeyName: string
+  modelCount: number
+  /** Entries in this panel's capabilityOverrides group. */
+  overrideCount: number
+  /** agent-default-model.provider === panel id. */
+  defaultModelTarget: boolean
+}
+
+function overrideCountOf(relaySection: unknown, panelId: string): number {
+  const raw = (relaySection && typeof relaySection === 'object' && !Array.isArray(relaySection))
+    ? (relaySection as Record<string, unknown>).capabilityOverrides
+    : undefined
+  const group = (raw && typeof raw === 'object' && !Array.isArray(raw))
+    ? (raw as Record<string, unknown>)[panelId]
+    : undefined
+  return group && typeof group === 'object' && !Array.isArray(group) ? Object.keys(group).length : 0
+}
+
+/**
+ * Build every panel's list row from three namespace views. Pure and I/O-free
+ * so the /panels route answers instantly (the v0.6.0 list called `self()` per
+ * panel and stalled up to the HTTP timeout when a panel was down).
+ */
+export function panelSummaries(input: {
+  /** Resolved `relay` section (panels + capabilityOverrides). */
+  relay: unknown
+  /** Resolved `llm-pi-ai` section (route catalogs → model counts). */
+  piAi: unknown
+  /** Resolved `agent-default-model` section (`.provider`), when it exists. */
+  defaultModel: unknown
+  /** Route models count lookup, injected so panels.ts stays route-agnostic. */
+  routeModelsCount: (route: string) => number
+}): PanelSummary[] {
+  const defaultProvider = (input.defaultModel && typeof input.defaultModel === 'object' && !Array.isArray(input.defaultModel))
+    ? (input.defaultModel as Record<string, unknown>).provider
+    : undefined
+  return panelsOf(input.relay).map((panel) => {
+    const missing = missingPanelSetup(panel)
+    return {
+      id: panel.id,
+      baseUrl: panel.baseUrl,
+      host: panelHost(panel.baseUrl),
+      relayKind: panel.relayKind,
+      configured: missing === null,
+      missing,
+      tokenConfigured: Boolean(panel.accessToken),
+      userId: panel.userId > 0 ? panel.userId : null,
+      keyRef: panel.keyRef,
+      selectedKeyName: panel.selectedKeyName || '',
+      modelCount: input.routeModelsCount(panel.id),
+      overrideCount: overrideCountOf(input.relay, panel.id),
+      defaultModelTarget: typeof defaultProvider === 'string' && defaultProvider === panel.id,
+    }
+  })
+}
+
 /** The pi-ai route profile fields derived from one panel's connection settings. */
 export function routeProfileFieldsFor(panel: Pick<PanelConfig, 'baseUrl' | 'keyRef'>): { api: string, baseURL: string, apiKeyEnv: string } {
   return {

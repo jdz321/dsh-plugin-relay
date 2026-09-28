@@ -4,13 +4,14 @@
  * `relay.panels` dict; deleting a panel tears down everything the panel
  * owns — its pi-ai route, its override group, its credential ref — but never
  * the global knowledge base. The panel id is the provider route key and
- * display name, so it is immutable after creation (rename = delete + create).
+ * display name, and v0.6.1 removed editing altogether: the id and every
+ * connection field are create-time only (change = delete + re-create).
  */
 
 import { NAMESPACE } from './constants.js'
-import { normalizePanel, panelIdError, panelsOf, uniqueKeyRef, type PanelConfig } from './panels.js'
+import { panelIdError, panelsOf, uniqueKeyRef, type PanelConfig } from './panels.js'
 import { ensureRouteProfile, unsetRoute } from './route-config.js'
-import type { CredentialsService, SettingsPathOp, SettingsService } from './types.js'
+import type { CredentialsService, SettingsService } from './types.js'
 
 /** Normalize a user-entered base URL the same way the old connection form did. */
 export function normalizeBaseUrl(value: string): string {
@@ -55,33 +56,6 @@ export async function createPanel(
   }
   await settings.update(NAMESPACE, { panels: { [id]: panel } })
   return panel
-}
-
-export async function updatePanel(
-  settings: SettingsService,
-  input: { panel?: unknown, baseUrl?: unknown, accessToken?: unknown, userId?: unknown },
-): Promise<PanelConfig> {
-  const id = typeof input.panel === 'string' ? input.panel.trim() : ''
-  const current = normalizePanel(id, (panelsOf(settings.get(NAMESPACE)) as PanelConfig[]).find((panel) => panel.id === id))
-  if (!current) throw new PanelRequestError(`找不到面板「${id}」`, 404)
-  const ops: SettingsPathOp[] = []
-  if (typeof input.baseUrl === 'string') {
-    const next = normalizeBaseUrl(input.baseUrl)
-    if (!next) throw new PanelRequestError('API 地址不能为空')
-    ops.push({ op: 'set', path: ['panels', id, 'baseUrl'], value: next })
-  }
-  if (input.userId !== undefined) {
-    const userId = Number(input.userId)
-    if (!Number.isFinite(userId) || userId <= 0) throw new PanelRequestError('用户 ID 须为正整数')
-    ops.push({ op: 'set', path: ['panels', id, 'userId'], value: userId })
-  }
-  // Write-only token: absent or empty means "keep the current one".
-  if (typeof input.accessToken === 'string' && input.accessToken.trim() !== '') {
-    ops.push({ op: 'set', path: ['panels', id, 'accessToken'], value: input.accessToken.trim() })
-  }
-  if (ops.length) await settings.mutate(NAMESPACE, ops)
-  const updated = normalizePanel(id, (panelsOf(settings.get(NAMESPACE)) as PanelConfig[]).find((panel) => panel.id === id))
-  return updated ?? current
 }
 
 export interface DeletePanelResult {

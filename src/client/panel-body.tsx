@@ -1,12 +1,14 @@
 /**
- * The panel detail page (v0.6.0): top bar with ← 返回, the panel name, its
- * status line and test button; below, the four per-panel tabs — API Keys /
- * 模型 / 数据看板 / 使用日志 — carried over verbatim from the v0.5.1 main
- * tabs, only now scoped to one panel (every request carries the panel id).
+ * The EXPANDED body of one connection-tab accordion panel (v0.6.1) — the
+ * former panel detail page without its back button. Header: the status line
+ * (models synced · active key) plus 测试连接 / 删除 outline buttons; below,
+ * the four per-panel tabs — API Keys / 模型 / 数据看板 / 使用日志 — scoped to
+ * one panel (every request carries the panel id). The component unmounts on
+ * collapse, so tab and draft state reset when the accordion moves on.
  */
 
 import { useCallback, useEffect, useState } from 'react'
-import { Button, StateDot } from '@deepseek-ai/dsh-client-ui-primitives'
+import { Button } from '@deepseek-ai/dsh-client-ui-primitives'
 
 import { apiGet, apiPost } from './api.js'
 import { DashboardTab } from './dashboard.js'
@@ -23,15 +25,15 @@ function errText(err: unknown): string {
   return err instanceof Error ? err.message : String(err)
 }
 
-export interface PanelDetailProps {
+export interface PanelBodyProps {
   t: Translator
   panel: PanelSummary
   readOnly: boolean
-  onBack: () => void
   onMessage: (message: { ok: boolean, text: string } | null) => void
+  onDelete: () => void
 }
 
-export function PanelDetail({ t, panel, readOnly, onBack, onMessage }: PanelDetailProps): JSX.Element {
+export function PanelBody({ t, panel, readOnly, onMessage, onDelete }: PanelBodyProps): JSX.Element {
   const [subTab, setSubTab] = useState<SubTab>('keys')
   const [keys, setKeys] = useState<KeysData | null>(null)
   const [keysBusy, setKeysBusy] = useState(false)
@@ -130,14 +132,14 @@ export function PanelDetail({ t, panel, readOnly, onBack, onMessage }: PanelDeta
 
   return (
     <div className="relay_tabPane">
-      <div className="relay_detailHead">
-        <Button variant="ghost" size="sm" onClick={onBack}>← {t('back')}</Button>
-        <StateDot state={panel.configured ? 'done' : 'error'} />
-        <span className="relay_detailTitle">{panel.id}</span>
+      <div className="relay_head">
         <span className="relay_metaLine">{t('statusLine')(panel.modelCount, panel.selectedKeyName || t('notSet'))}</span>
         <span className="relay_formActions">
           <Button variant="outline" size="sm" disabled={testBusy} onClick={() => { void testConnection() }}>
             {testBusy ? t('testing') : t('testConnection')}
+          </Button>
+          <Button variant="outline" size="sm" disabled={readOnly} onClick={onDelete}>
+            {t('keyDelete')}
           </Button>
         </span>
       </div>

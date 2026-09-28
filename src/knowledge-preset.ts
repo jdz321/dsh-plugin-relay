@@ -179,6 +179,9 @@ export function buildPresetEntries(
   }
   const bare = new Set(whitelistNames.filter((name) => stripAllDecorations(name) === name))
   const finalNameOf = new Map<string, string>()
+  // Rekey targets claimed so far — a Set, not a values() linear scan (the
+  // whitelist runs a few hundred names; this keeps dedup O(n) for its own sake).
+  const strippedUsed = new Set<string>()
   const channelDropped: string[] = []
   const rekeyed: Array<{ from: string, to: string }> = []
   for (const name of whitelistNames) {
@@ -187,11 +190,12 @@ export function buildPresetEntries(
       finalNameOf.set(name, name)
       continue
     }
-    if (bare.has(stripped) || [...finalNameOf.values()].includes(stripped)) {
+    if (bare.has(stripped) || strippedUsed.has(stripped)) {
       channelDropped.push(name)
       continue
     }
     finalNameOf.set(name, stripped)
+    strippedUsed.add(stripped)
     rekeyed.push({ from: name, to: stripped })
   }
 

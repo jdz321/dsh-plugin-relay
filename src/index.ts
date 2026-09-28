@@ -13,6 +13,7 @@
 
 import Schema from '@deepseek-ai/schemastery'
 
+import { AccountCache } from './account.js'
 import { applyCapabilityOps } from './capability-ops.js'
 import { ModelsDevClient } from './capabilities.js'
 import { CLIENT_MODULE_ID, NAMESPACE, PLUGIN_NAME } from './constants.js'
@@ -22,6 +23,9 @@ import {
   deriveCapabilityFor,
   knowledgeForPanel,
   normalizeKnowledgeConfig,
+  normalizePresetDelta,
+  resolvePreset,
+  summarizePresetDelta,
   type CatalogEntry,
   type KnowledgeConfig,
 } from './knowledge.js'
@@ -35,14 +39,14 @@ import {
 } from './plan.js'
 import {
   missingPanelSetup,
-  panelHost,
+  panelSummaries,
   panelsOf,
   relayFromPanel,
   type PanelConfig,
 } from './panels.js'
-import { createPanel, deletePanel, PanelRequestError, updatePanel } from './panels-ops.js'
+import { createPanel, deletePanel, PanelRequestError } from './panels-ops.js'
 import { groupRatioOf, priceEntry } from './pricing.js'
-import { refreshPresetAndReplay } from './refresh.js'
+import { refreshPresetAndReplay, restorePresetBaseline } from './refresh.js'
 import { ensureRouteProfile, storedRouteProfile, syncRouteCatalog } from './route-config.js'
 import type { CredentialsService, HostContext, SchemaType, SettingsService } from './types.js'
 import { aggregateDailyBuckets, buildDashboardView, normalizeLog, startOfDaysAgo, startOfToday } from './usage.js'
@@ -56,6 +60,13 @@ const CapabilityEntrySchema = Schema.object({
   reasoning: Schema.union([Schema.boolean(), Schema.array(Schema.string())]),
   contextWindow: Schema.number(),
   maxTokens: Schema.number(),
+})
+
+/** The persisted refresh delta against the compiled preset baseline. */
+const PresetDeltaSchema = Schema.object({
+  builtAt: Schema.number(),
+  removed: Schema.array(Schema.string()),
+  changed: Schema.dict(CapabilityEntrySchema),
 })
 
 /**
@@ -80,12 +91,14 @@ export interface PluginConfig {
   panels: Record<string, unknown>
   capabilityCatalog: Record<string, unknown>
   capabilityOverrides: Record<string, Record<string, unknown>>
+  capabilityPresetDelta?: Record<string, unknown>
 }
 
 const configShape = {
   panels: Schema.dict(PanelSchema),
   capabilityCatalog: Schema.dict(CapabilityEntrySchema),
   capabilityOverrides: Schema.dict(Schema.dict(CapabilityEntrySchema)),
+  capabilityPresetDelta: PresetDeltaSchema,
 }
 
 export const Config: SchemaType<PluginConfig> = Schema.object(configShape) as SchemaType<PluginConfig>
@@ -161,15 +174,26 @@ function currentKnowledge(): KnowledgeConfig {
 }
 
 /**
- * In-memory preset layer rebuilt by POST /api/relay/knowledge-refresh. Null
- * means "use the compiled-in baseline" (src/knowledge-preset.generated.ts) —
- * a restart deliberately falls back to it; persistence is preset:fetch's job.
+ * The preset delta persisted by the last 「刷新预置」 (v0.6.1). Read through the
+ * raw section — the resolved view materializes the schemastery `{}` shell,
+ * which normalizePresetDelta rejects as absent.
  */
-let runtimePreset: Record<string, CatalogEntry> | null = null
+function storedPresetDelta() {
+  const raw = safeGet(NAMESPACE)
+  const delta = (raw && typeof raw === 'object' && !Array.isArray(raw))
+    ? (raw as Record<string, unknown>).capabilityPresetDelta
+    : undefined
+  return normalizePresetDelta(delta)
+}
+
+/** The effective preset layer: compiled baseline + the persisted delta. */
+function effectivePreset(): Record<string, CatalogEntry> {
+  return resolvePreset(KNOWLEDGE_PRESET, storedPresetDelta())
+}
 
 /** User dicts + the effective preset layer, as every derivation consumes. */
 function resolvedKnowledge(): KnowledgeConfig {
-  return { ...currentKnowledge(), capabilityPreset: runtimePreset ?? KNOWLEDGE_PRESET }
+  return { ...currentKnowledge(), capabilityPreset: effectivePreset() }
 }
 
 /** JSON response helper (fetch routes answer with standard Response). */
@@ -220,6 +244,9 @@ function buildState() {
 
 /** models.dev lookup, single instance per plugin process. */
 const modelsDev = new ModelsDevClient({ proxy: envProxy() })
+
+/** Account lines behind GET /api/relay/account, 5s TTL (success and failure). */
+const accountCache = new AccountCache()
 
 /** Debounced route-profile mirror after connection edits (every panel). */
 let mirrorTimer: ReturnType<typeof setTimeout> | null = null
@@ -353,51 +380,27 @@ function capabilitiesView() {
       models: capabilityModelsView(panel),
     }
   })
+  const delta = storedPresetDelta()
   return {
     ok: true,
     configured: panels.some((panel) => panel.configured),
     panels,
     catalog: knowledge.capabilityCatalog,
     overrides: knowledge.capabilityOverrides,
-    presets: runtimePreset ?? KNOWLEDGE_PRESET,
+    presets: effectivePreset(),
+    baselineCount: Object.keys(KNOWLEDGE_PRESET).length,
+    ...(delta !== undefined ? { presetDelta: summarizePresetDelta(KNOWLEDGE_PRESET, delta) } : {}),
   }
 }
 
-/** Per-panel list summary for the connection tab. */
-async function panelsResponse(): Promise<Response> {
-  const panels = currentPanels()
-  const summaries = await Promise.all(panels.map(async (panel) => {
-    const missing = missingPanelSetup(panel)
-    let account: { username: string, quotaCny: string } | null = null
-    if (!missing) {
-      try {
-        const self = await relayFromPanel(panel).self()
-        if (self) {
-          account = {
-            username: String(self.username ?? self.id ?? ''),
-            quotaCny: formatQuota(self.quota as number | undefined),
-          }
-        }
-      } catch {
-        /* the row shows the config state, not the account */
-      }
-    }
-    const models = storedRouteModelsCount(panel.id)
-    return {
-      id: panel.id,
-      baseUrl: panel.baseUrl,
-      host: panelHost(panel.baseUrl),
-      relayKind: panel.relayKind,
-      configured: missing === null,
-      missing,
-      tokenConfigured: Boolean(panel.accessToken),
-      userId: panel.userId > 0 ? panel.userId : null,
-      keyRef: panel.keyRef,
-      selectedKeyName: panel.selectedKeyName || '',
-      modelCount: models,
-      account,
-    }
-  }))
+/** Per-panel list summaries for the connection tab — pure config state, no I/O. */
+function panelsResponse(): Response {
+  const summaries = panelSummaries({
+    relay: safeGet(NAMESPACE),
+    piAi: safeGet('llm-pi-ai'),
+    defaultModel: safeGet('agent-default-model'),
+    routeModelsCount: storedRouteModelsCount,
+  })
   return json({ ok: true, panels: summaries })
 }
 
@@ -406,8 +409,8 @@ function storedRouteModelsCount(route: string): number {
   return Array.isArray(profile?.models) ? profile!.models!.length : 0
 }
 
-/** Panel create/update/delete share one body shape and error mapping. */
-async function handlePanelsMutation(request: Request, action: 'create' | 'update' | 'delete'): Promise<Response> {
+/** Panel create/delete share one body shape and error mapping (v0.6.1: edit is gone). */
+async function handlePanelsMutation(request: Request, action: 'create' | 'delete'): Promise<Response> {
   if (!settingsService) return json({ ok: false, error: 'settings service unavailable' }, 500)
   const body = await readJson(request)
   if (action === 'create') {
@@ -415,24 +418,10 @@ async function handlePanelsMutation(request: Request, action: 'create' | 'update
     hostLogger?.info(`relay: panel ${panel.id} created`)
     return json({ ok: true, panel: { id: panel.id, keyRef: panel.keyRef } })
   }
-  if (action === 'update') {
-    const panel = await updatePanel(settingsService, body)
-    await mirrorPanelQuietly(panel)
-    return json({ ok: true, panel: { id: panel.id } })
-  }
   const id = typeof body.panel === 'string' ? body.panel.trim() : ''
   const result = await deletePanel(settingsService, credentialsService, id)
   hostLogger?.info(`relay: panel ${id} deleted (route removed: ${result.routeRemoved})`)
   return json({ ok: true, ...result })
-}
-
-async function mirrorPanelQuietly(panel: PanelConfig): Promise<void> {
-  if (!settingsService) return
-  try {
-    await ensureRouteProfile(settingsService, panel)
-  } catch {
-    /* connection mirror is cosmetic */
-  }
 }
 
 /**
@@ -464,12 +453,31 @@ export function apply(ctx: HostContext, config: Partial<PluginConfig> | undefine
       return json({ ok: true, state: buildState() })
     })
 
-    // Panel list summaries for the connection tab.
-    route(connection, ctx, 'panels', ['GET'], () => panelsResponse())
+    // Panel list summaries for the connection tab (pure config state — the
+    // account line fills lazily via /account below).
+    route(connection, ctx, 'panels', ['GET'], async () => panelsResponse())
 
     route(connection, ctx, 'panels-create', ['POST'], (request) => handlePanelsMutation(request, 'create'))
-    route(connection, ctx, 'panels-update', ['POST'], (request) => handlePanelsMutation(request, 'update'))
     route(connection, ctx, 'panels-delete', ['POST'], (request) => handlePanelsMutation(request, 'delete'))
+
+    // Lazy account line for one panel row: username + balance from
+    // /api/user/self, served from a 5s TTL cache (failures included) so a
+    // client re-render storm cannot hammer an unreachable panel.
+    route(connection, ctx, 'account', ['GET'], async (request) => {
+      const panel = resolvePanel(new URL(request.url).searchParams.get('panel'))
+      const missing = missingPanelSetup(panel)
+      if (missing) return json({ ok: false, error: `missing:${missing}` }, 400)
+      const result = await accountCache.lookup(panel, async (target) => {
+        const self = await relayFromPanel(target).self()
+        if (!self) throw new Error('面板未返回账户信息')
+        return {
+          username: String(self.username ?? self.id ?? ''),
+          quotaCny: formatQuota(self.quota as number | undefined),
+        }
+      })
+      if (!result.ok) return json({ ok: false, error: result.error }, 502)
+      return json({ ok: true, account: result.account })
+    })
 
     // Connection test for one panel: GET /api/user/self with the saved
     // settings, classified into the four failure shapes (§6).
@@ -579,25 +587,37 @@ export function apply(ctx: HostContext, config: Partial<PluginConfig> | undefine
 
     // 刷新预置: force-fetch models.dev (bypassing the TTL cache), rebuild the
     // preset layer with the same mainstream rules as `npm run preset:fetch`,
-    // hold it in host memory until restart, and replay the derivation over
-    // every configured panel route (the v0.5.1 gap: the replay used to wait
-    // for the next key switch / sync / save).
+    // PERSIST the difference against the compiled baseline as the namespace's
+    // `capabilityPresetDelta` (one awaited mutate — the delta survives
+    // restarts; 恢复基线 is the way back), and replay the derivation over
+    // every configured panel route.
     route(connection, ctx, 'knowledge-refresh', ['POST'], async () => {
+      if (!settingsService) return json({ ok: false, error: 'settings service unavailable' }, 500)
       let result
       try {
         result = await refreshPresetAndReplay({
           fetchDoc: () => modelsDev.refresh(),
-          settings: settingsService!,
+          settings: settingsService,
           panels: currentPanels(),
-          onPreset: (entries) => {
-            runtimePreset = entries
-            hostLogger?.info(`relay: knowledge preset refreshed (${Object.keys(entries).length} entries)`)
-          },
+          baseline: KNOWLEDGE_PRESET,
           knowledge: resolvedKnowledge,
         })
       } catch (err) {
         return json({ ok: false, error: `models.dev 获取失败: ${err instanceof Error ? err.message : String(err)}` }, 502)
       }
+      hostLogger?.info(`relay: knowledge preset refreshed (${result.count} entries, delta +${result.delta.added + result.delta.updated} / -${result.delta.removed})`)
+      return json({ ok: true, ...result })
+    })
+
+    // 恢复基线: drop the persisted preset delta (back to the compiled-in
+    // baseline) and replay the derivation over every configured panel route.
+    route(connection, ctx, 'preset-restore', ['POST'], async () => {
+      if (!settingsService) return json({ ok: false, error: 'settings service unavailable' }, 500)
+      const result = await restorePresetBaseline({
+        settings: settingsService,
+        panels: currentPanels(),
+        knowledge: resolvedKnowledge,
+      })
       return json({ ok: true, ...result })
     })
 

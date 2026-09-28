@@ -68,6 +68,10 @@ export interface CapData {
   catalog?: Record<string, CapDictEntry>
   overrides?: Record<string, Record<string, CapDictEntry>>
   presets?: Record<string, CapDictEntry>
+  /** Compiled-in baseline entry count (v0.6.1 preset status line). */
+  baselineCount?: number
+  /** Persisted refresh delta summary; absent = no delta stored. */
+  presetDelta?: { builtAt: number, added: number, updated: number, removed: number }
 }
 
 /** One model row from GET /api/relay/models (price carries the vendor). */
@@ -119,13 +123,35 @@ export function coverageCounts(models: readonly CapEntryView[]): { total: number
   return counts
 }
 
+/** The filterable source buckets of the coverage indicator (R5). */
+export type CoverageBucket = 'preset' | 'catalog' | 'override' | 'none'
+
+/** Which bucket one derived view belongs to. */
+export function coverageBucketOf(view: CapEntryView): CoverageBucket {
+  if (view.source === 'override') return 'override'
+  if (view.source === 'catalog' || view.source === 'catalog-approximate') return 'catalog'
+  if (view.source === 'preset' || view.source === 'preset-approximate') return 'preset'
+  return 'none'
+}
+
+/** `M-DD` of a unix-ms timestamp (the preset status line's refresh date). */
+export function monthDay(builtAt: number): string {
+  const d = new Date(builtAt)
+  const pad = (n: number): string => String(n).padStart(2, '0')
+  return `${d.getMonth() + 1}-${pad(d.getDate())}`
+}
+
 export function CapabilitiesView({ t, caps, refreshCaps, onMessage }: CapabilitiesViewProps): JSX.Element {
   const [openCard, setOpenCard] = useState<OpenCard | null>(null)
   const [kbDelete, setKbDelete] = useState<string | null>(null)
   const [overrideClear, setOverrideClear] = useState<{ panel: string, id: string } | null>(null)
   const [presetFilter, setPresetFilter] = useState('')
   const [refreshBusy, setRefreshBusy] = useState(false)
+  const [restoreConfirm, setRestoreConfirm] = useState(false)
+  const [restoreBusy, setRestoreBusy] = useState(false)
   const [vendors, setVendors] = useState<Record<string, Record<string, string>>>({})
+  /** Coverage filter (R5): one panel + one source bucket at a time. */
+  const [sourceFilter, setSourceFilter] = useState<{ panel: string, source: CoverageBucket } | null>(null)
 
   const catalogEntries = useMemo(() => Object.entries(caps?.catalog ?? {}).sort(([a], [b]) => a.localeCompare(b)), [caps])
   const presetEntries = useMemo(() => Object.entries(caps?.presets ?? {}).sort(([a], [b]) => a.localeCompare(b)), [caps])
@@ -257,6 +283,26 @@ export function CapabilitiesView({ t, caps, refreshCaps, onMessage }: Capabiliti
     }
   }
 
+  const restoreBaseline = async (): Promise<void> => {
+    setRestoreBusy(true)
+    try {
+      const body = await apiPost('/api/relay/preset-restore', {})
+      if (body.ok && body.replayed !== false) {
+        onMessage({ ok: true, text: t('capPresetRestored') })
+      } else if (body.ok) {
+        onMessage({ ok: false, text: t('capPresetRestoreReplayFail')(String(body.replayError ?? '?')) })
+      } else {
+        onMessage({ ok: false, text: t('capPresetRestoreFail')(String(body.error ?? '?')) })
+      }
+    } catch (err) {
+      onMessage({ ok: false, text: t('capPresetRestoreFail')(err instanceof Error ? err.message : String(err)) })
+    } finally {
+      setRestoreBusy(false)
+      setRestoreConfirm(false)
+      refreshCaps()
+    }
+  }
+
   const sourceBadge = (view: CapEntryView): JSX.Element => {
     if (view.source === 'override') return <Tag tone="warning">{t('capSourceOverride')}</Tag>
     if (view.source === 'catalog') return <Tag tone="success">{t('capSourceCatalog')}</Tag>
@@ -332,6 +378,11 @@ export function CapabilitiesView({ t, caps, refreshCaps, onMessage }: Capabiliti
                   {t('capPresetCount')(presetEntries.length)}
                 </summary>
                 <div className="relay_presetBody">
+                  <p className="relay_metaLine">
+                    {caps.presetDelta !== undefined && caps.baselineCount !== undefined
+                      ? t('capPresetDeltaLine')(caps.baselineCount, caps.presetDelta.added + caps.presetDelta.updated, caps.presetDelta.removed, monthDay(caps.presetDelta.builtAt))
+                      : t('capPresetBaseline')(caps.baselineCount ?? presetEntries.length)}
+                  </p>
                   <p className="relay_metaLine">{t('capPresetIntro')}</p>
                   <div className="relay_presetToolbar">
                     <input
@@ -340,9 +391,14 @@ export function CapabilitiesView({ t, caps, refreshCaps, onMessage }: Capabiliti
                       value={presetFilter}
                       onChange={(e) => setPresetFilter(e.target.value)}
                     />
-                    <Button variant="ghost" size="sm" disabled={refreshBusy} onClick={() => { void refreshPreset() }}>
+                    <Button variant="ghost" size="sm" disabled={refreshBusy || restoreBusy} onClick={() => { void refreshPreset() }}>
                       {refreshBusy ? t('capPresetRefreshing') : t('capPresetRefresh')}
                     </Button>
+                    {caps.presetDelta !== undefined && (
+                      <Button variant="outline" size="sm" disabled={refreshBusy || restoreBusy} onClick={() => setRestoreConfirm(true)}>
+                        {restoreBusy ? t('capPresetRestoring') : t('capPresetRestore')}
+                      </Button>
+                    )}
                   </div>
                   {filteredPresets.length === 0 ? <div className="relay_empty">{t('capPresetEmpty')}</div>
                     : filteredPresets.map(([name, entry]) => isOpen('preset', name) ? (
@@ -378,14 +434,37 @@ export function CapabilitiesView({ t, caps, refreshCaps, onMessage }: Capabiliti
                 : panelViews.map((panel) => {
                   const models = panel.models ?? []
                   const coverage = coverageCounts(models)
+                  const panelFilter = sourceFilter !== null && sourceFilter.panel === panel.id ? sourceFilter.source : null
+                  const shownModels = panelFilter === null ? models : models.filter((view) => coverageBucketOf(view) === panelFilter)
+                  const segment = (bucket: CoverageBucket, label: string, count: number): JSX.Element => (
+                    <button
+                      key={bucket}
+                      type="button"
+                      className={panelFilter === bucket ? 'relay_capFilterSeg relay_capFilterSegActive' : 'relay_capFilterSeg'}
+                      onClick={() => setSourceFilter(panelFilter === bucket ? null : { panel: panel.id, source: bucket })}
+                    >
+                      {label} {count}
+                    </button>
+                  )
                   return (
                     <div key={panel.id} className="relay_capPanelGroup">
                       <div className="relay_capPanelHead">
                         <span className="relay_capPanelName">{panel.id}</span>
-                        <span className="relay_capHint">{t('capCoverage')(coverage.total, coverage.preset, coverage.catalog, coverage.override, coverage.none)}</span>
+                        <span className="relay_capHint">
+                          {t('capCoverageTotal')(coverage.total)}
+                          {t('capCoverageColon')}
+                          {segment('preset', t('capSourcePreset'), coverage.preset)}
+                          {' · '}
+                          {segment('catalog', t('capSourceCatalog'), coverage.catalog)}
+                          {' · '}
+                          {segment('override', t('capSourceOverride'), coverage.override)}
+                          {' · '}
+                          {segment('none', t('capSourceNone'), coverage.none)}
+                        </span>
                       </div>
                       {!panel.configured || models.length === 0 ? <div className="relay_empty">{t('capNotConfigured')}</div>
-                        : models.map((view) => {
+                        : shownModels.length === 0 ? <div className="relay_empty">{t('capPresetEmpty')}</div>
+                        : shownModels.map((view) => {
                           if (isOpen('platform', view.id, panel.id)) {
                             return (
                               <PlatformCard
@@ -458,6 +537,21 @@ export function CapabilitiesView({ t, caps, refreshCaps, onMessage }: Capabiliti
           <>
             <Button variant="outline" onClick={() => setOverrideClear(null)}>{t('cancel')}</Button>
             <Button variant="primary" onClick={() => { void clearOverride() }}>{t('capClearOverride')}</Button>
+          </>
+        )}
+      />
+      <Modal
+        open={restoreConfirm}
+        onClose={() => { if (!restoreBusy) setRestoreConfirm(false) }}
+        title={t('capPresetRestoreTitle')}
+        closeLabel={t('close')}
+        description={t('capPresetRestoreDesc')}
+        footer={(
+          <>
+            <Button variant="outline" disabled={restoreBusy} onClick={() => setRestoreConfirm(false)}>{t('cancel')}</Button>
+            <Button variant="primary" disabled={restoreBusy} onClick={() => { void restoreBaseline() }}>
+              {restoreBusy ? t('capPresetRestoring') : t('capPresetRestore')}
+            </Button>
           </>
         )}
       />

@@ -130,6 +130,8 @@ export interface MockRelayOptions {
   modelsForKey1?: string[]
   /** Serve /api/pricing with a vendors list (panel fork extension). */
   withVendors?: boolean
+  /** Extra /api/data/self buckets (Top-N fold walkthroughs need >7 models). */
+  extraBuckets?: Record<string, unknown>[]
   /** Fixed listen port (default: random) — for the standalone browser-walkthrough runner. */
   port?: number
 }
@@ -262,7 +264,8 @@ export async function startMockRelay(opts: MockRelayOptions = {}): Promise<MockR
     }
     if (url.startsWith('/api/data/self')) {
       if (!authorized) return json(401, { success: false, message: '无权进行此操作' })
-      const buckets = DATA_BUCKETS.filter((bucket) => withinWindow(Number(bucket.created_at), query))
+      const allBuckets = opts.extraBuckets ? [...DATA_BUCKETS, ...opts.extraBuckets] : DATA_BUCKETS
+      const buckets = allBuckets.filter((bucket) => withinWindow(Number(bucket.created_at), query))
       return json(200, { success: true, message: '', data: buckets })
     }
     if (url === '/api/pricing') {

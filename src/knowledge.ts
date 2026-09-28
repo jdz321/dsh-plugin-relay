@@ -33,6 +33,111 @@ export interface CatalogEntry {
 export type OverrideEntry = CatalogEntry
 
 /**
+ * The persisted preset delta (v0.6.1 `capabilityPresetDelta`): the difference
+ * of the last 「刷新预置」 against the COMPILED baseline. `changed` holds full
+ * entries that are new or modified relative to the baseline; `removed` names
+ * baseline entries the refresh no longer carries. Restart-stable by design —
+ * the effective layer is always `resolvePreset(baseline, delta)`.
+ */
+export interface PresetDelta {
+  builtAt: number
+  removed: string[]
+  changed: Record<string, CatalogEntry>
+}
+
+/** Summary of a delta for the settings-page status line. */
+export interface PresetDeltaSummary {
+  builtAt: number
+  /** Entries added on top of the baseline. */
+  added: number
+  /** Entries whose values differ from the baseline. */
+  updated: number
+  /** Baseline entries the refresh removed. */
+  removed: number
+}
+
+/**
+ * Validate a raw stored delta; undefined for anything unusable (absent,
+ * non-object, wrong members). Invalid entries inside `changed` drop
+ * individually; an empty result is still a delta (it records builtAt).
+ */
+export function normalizePresetDelta(raw: unknown): PresetDelta | undefined {
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return undefined
+  const record = raw as Record<string, unknown>
+  const builtAt = Number(record.builtAt)
+  if (!Number.isFinite(builtAt) || builtAt <= 0) return undefined
+  const removed: string[] = []
+  if (Array.isArray(record.removed)) {
+    for (const name of record.removed) {
+      if (typeof name !== 'string') continue
+      const key = name.trim()
+      if (key) removed.push(key)
+    }
+  }
+  const changed: Record<string, CatalogEntry> = {}
+  if (record.changed !== null && typeof record.changed === 'object' && !Array.isArray(record.changed)) {
+    for (const [name, entry] of Object.entries(record.changed as Record<string, unknown>)) {
+      const key = name.trim()
+      const normalized = normalizeCapabilityEntry(entry)
+      if (key && normalized) changed[key] = normalized
+    }
+  }
+  return { builtAt, removed, changed }
+}
+
+/** Canonical string form for entry comparison (key order independent). */
+function canonicalEntry(entry: CatalogEntry): string {
+  return JSON.stringify(entry, Object.keys(entry).sort())
+}
+
+/**
+ * The effective preset layer: `baseline − removed ∪ changed`. An absent or
+ * invalid delta yields the baseline untouched.
+ */
+export function resolvePreset(baseline: Record<string, CatalogEntry>, delta: PresetDelta | undefined): Record<string, CatalogEntry> {
+  if (!delta) return baseline
+  const effective: Record<string, CatalogEntry> = {}
+  const removed = new Set(delta.removed)
+  for (const [name, entry] of Object.entries(baseline)) {
+    if (!removed.has(name)) effective[name] = entry
+  }
+  for (const [name, entry] of Object.entries(delta.changed)) {
+    effective[name] = entry
+  }
+  return effective
+}
+
+/**
+ * The delta a refresh should persist: `changed` keeps only entries that
+ * differ from the baseline (or are new); `removed` names baseline entries the
+ * refresh dropped.
+ */
+export function diffPreset(baseline: Record<string, CatalogEntry>, next: Record<string, CatalogEntry>): { removed: string[], changed: Record<string, CatalogEntry> } {
+  const removed: string[] = []
+  const changed: Record<string, CatalogEntry> = {}
+  for (const [name, entry] of Object.entries(baseline)) {
+    const refreshed = next[name]
+    if (refreshed === undefined) removed.push(name)
+    else if (canonicalEntry(refreshed) !== canonicalEntry(entry)) changed[name] = refreshed
+  }
+  for (const [name, entry] of Object.entries(next)) {
+    if (baseline[name] === undefined) changed[name] = entry
+  }
+  return { removed, changed }
+}
+
+/** Counts of a delta for display; entries equal to the baseline still count. */
+export function summarizePresetDelta(baseline: Record<string, CatalogEntry>, delta: PresetDelta): PresetDeltaSummary {
+  let added = 0
+  let updated = 0
+  for (const name of Object.keys(delta.changed)) {
+    if (baseline[name] === undefined) added += 1
+    else updated += 1
+  }
+  return { builtAt: delta.builtAt, added, updated, removed: delta.removed.length }
+}
+
+/**
  * The capability structures as STORED in the namespace: overrides are grouped
  * per panel (each panel has its own model ids), while the knowledge base and
  * the preset layer stay global — they match by canonical model name,

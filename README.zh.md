@@ -50,7 +50,7 @@ dsh plugin --profile web add /path/to/dsh-plugin-relay
 
 ## 工作原理
 
-- 插件注册 `relay` 设置 namespace：`panels` 字典（每套面板的连接字段；访问令牌是 secret 字段，接口层自动脱敏）、全局知识库与按面板分组的覆盖配置；并在 dsh 的浏览器信任围栏内提供 `/api/relay/{state,panels,panels-create,panels-update,panels-delete,connection-test,keys,keys-create,keys-update,keys-delete,use,models,capabilities,model-info,knowledge-refresh,dashboard,logs,logs-stat,logs-meta}` 路由。
+- 插件注册 `relay` 设置 namespace：`panels` 字典（每套面板的连接字段；访问令牌是 secret 字段，接口层自动脱敏）、全局知识库与按面板分组的覆盖配置；并在 dsh 的浏览器信任围栏内提供 `/api/relay/{state,panels,panels-create,panels-delete,account,connection-test,keys,keys-create,keys-update,keys-delete,use,models,capabilities,model-info,knowledge-refresh,preset-restore,dashboard,logs,logs-stat,logs-meta}` 路由。
 - 每套面板首次切换 key 时，插件把该面板的 pi-ai 路由配置（`api: openai-completions`、`baseURL: <面板>/v1`、`apiKeyEnv: RELAY_API_KEY_<面板名大写>`、合并后的模型目录）写入 dsh 设置——dsh 对路由热加载，无需重启。API key 本身按请求从该面板的凭据引用解析。
 - 目录同步按模型 id 合并：存活模型的手工修正全部保留；key 已不可调用的模型会被移除，dsh 只会提供 key 真正能调用的模型。路由条目上的能力字段是**派生状态**：每次同步、每次能力保存、每次预置刷新都按「覆盖 → 知识库（自定义优先，其次预置层）」重放；只有插件持有配置的字段才会被写——你在官方「模型」页对未配置 id 的手工修改不会被冲掉。
 - 能力保存是**定向操作**（`catalogSet` / `catalogDelete` / `overrideSet` / `overrideDelete`，覆盖操作携带所属面板），逐条落到 settings 路径操作——删除真实生效，不会被深合并掩盖——随后对受影响的路由目录做修订守卫重放。
@@ -74,7 +74,7 @@ dsh plugin --profile web add /path/to/dsh-plugin-relay
 - 面板与知识库都未报告模型容量时，按 id 前缀启发式推断 context window / 最大输出，未识别的 id 回退 131072 / 8192。
 - 知识库匹配每一层都要求全等（大小写折叠、剥后缀、版本分隔符互换、变体补全），歧义即放弃；渠道命名的面板特有模型（如 `grok-video`）按设计不匹配。
 - 预置基线只收录主流模型——第一方厂商近 1 年内发布的对话模型。售卖更老或小众模型的面板会回落「未配置」；可自建条目或等「刷新预置」（同一套规则）。
-- 预置刷新只保存在宿主内存——这是设计而非缺陷，重启回落到编译基线；持久化新基线是 `npm run preset:fetch` 的职责。
+- 预置刷新以增量形式持久化在编译基线之上；插件升级带新基线时旧增量仍会叠加（它表达「用户上次刷新的意图」），极端情况下可能与新基线不一致——「恢复基线」是一键出口。
 - 面板名称创建后不可修改（它是路由键、凭据引用与覆盖分组的名字）；改名 = 删除重建。
 - 面板对日志明细与看板桶只保留近期数据；更早的数据属于面板保留策略，不是插件缺陷。
 - models.dev 是第三方快照——未收录的模型与 toggle 型推理以手动配置兜底。

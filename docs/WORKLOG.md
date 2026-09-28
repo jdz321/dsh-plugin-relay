@@ -392,7 +392,56 @@
 
 ---
 
-## 2026-09-28（v0.6.0 — 多套中转站 + 主流预置基线 + maxTokens + SVG 图表）
+
+---
+
+## 2026-09-28（v0.6.1 — 折叠面板、预置增量层、双轴图表）
+
+### 0. 概览
+
+按 docs/SPEC-0.6.1.md 实施六组需求（R1 连接 tab 折叠面板重构 + §3.3 样式修复、R2 预置刷新持久化增量层、R3 图表双轴/Top-N、R4 删除 Modal 增强、R5 覆盖率分段过滤、R6 工程项），中英两遍走查 + 落盘/rect/describe 断言 + 真实账号只读验证全部通过。client 产物 ~104KB（350KB 断言内），单测 210 全绿。
+
+### 1. R1 折叠面板（最大 UI 变量）
+
+- `panel-detail.tsx` git mv 为 `panel-body.tsx`（去返回按钮，头部 = 状态行 + 测试连接 + 删除 outline），四个 tab 组件零改动（spec §2 预判成立——风险集中在 section/panels-tab 状态提升）。
+- `openPanelId` 语义从「进入二级页」改为「展开哪个折叠项」；caps 刷新 effect 依赖不变（revision + openPanelId），v0.6.0 修过的「切 key 后平台区过期」未回归（走查实证）。
+- 编辑链路整体移除：`panels-update` 路由、`updatePanel`、client edit 分支；spec 指出「名称创建后不可改的约束自然消失——因为根本没有改」，实际连带删掉了 `panelFormError` 的 edit 分支与 `tokenPlaceholderSet` 文案。
+- **§3.3 样式修复实证**：`.relay_head button{white-space:nowrap}` 并入既有分组选择器；新增卡标签缩短为词组 + 说明下沉 `relay_capHint`（中英各四个 hint 键）；rect 断言两列输入框 top 426/426、530/530 全对齐。
+- **/panels 秒回 + account 懒加载**：`panelSummaries()` 纯函数（panels.ts，relay/pi-ai/default-model 三视图入参，`routeModelsCount` 注入）返回纯配置态 + `overrideCount`/`defaultModelTarget`；`AccountCache`（account.ts）5s TTL、失败同缓存；真实面板实测列表秒回、账户行 ~3.5s 后行内填充（不可达面板不阻塞）。
+
+### 2. R2 预置增量层
+
+- 数据模型 `capabilityPresetDelta = {builtAt, removed[], changed{}}`（SectionSchema 新键，dict(CapabilityEntrySchema)）；`resolvePreset/diffPreset/normalizePresetDelta/summarizePresetDelta` 全在 knowledge.ts（diff 用 canonical JSON 比较，键序无关）。
+- 刷新 = 先 `mutate` 落盘 delta（await 完才返回，竞态红线）→ `resolvedKnowledge()`（读 raw section 的 delta，规避 schemastery `{}` 壳）→ 逐面板重放；`runtimePreset` 内存变量删除。「刷新预置」与「恢复基线」（`POST /api/relay/preset-restore`，Modal 确认 → unset → 重放）共用 refresh.ts。
+- 走查全链路：基线 140 → 刷新 142（+2/−0，9-28）→ settings.yaml 精确断言（builtAt/removed/changed 结构）→ **dsh 进程重启后增量仍在**（换新编译基线 142 后 delta 依旧叠加——spec §11 预判的叠加语义实证）→ 恢复基线 → 落盘断言 delta 键消失。
+- 注意：SectionSchema 的 schemastery resolved 值会把缺省 dict 具体化为 `{}`，`normalizePresetDelta({})` 返回 undefined——「无 delta」判定天然正确。
+
+### 3. R3/R4/R5
+
+- 双轴：`linePath/linePoints` 纯函数（band 中心取点、负值钳 0）；右轴独立 niceScale + tokenCountText 刻度；折线 `<circle>` 带 `<title>`；图例加「Token 总量（右轴）」静态条目。几何断言：右轴 0/1.95k/3.91k/5.86k 无重叠，全部文字与折线 bounding box 在 SVG 界内（视觉模型对截图的「折线越界」告警系裁切误报，DOM 几何复核推翻）。
+- Top-N：`topSeries`（窗口总额排序、并列按名字升序稳定）+ `OTHERS_KEY='__others__'` 合并列；图例「其他」不可点（span 非 button）；9 模型 mock（mock-relay.ts 加 `extraBuckets` 选项）实证 7 彩 + Other 5 + 8 种填充色。纯函数与 pivotBuckets 挪进 dashboard-chart.tsx——vitest 无法加载 primitives 的 CSS 导入，测试文件只 import 无 react 依赖的模块。
+- 删除 Modal：警告行走 Modal 的 `children`（ReactNode 通道），`description` 保持 string（primitives 类型如此）；`defaultModelTarget` 读 `agent-default-model.provider`。走查实证三行齐现；注意 panels 响应是 revision 驱动的——RPC 直写 agent-default-model 后需刷新页面才出现警告（正常 UI 操作会带 revision bump，无实际影响）。
+- 覆盖率分段：四个 `relay_capFilterSeg` 按钮替代纯文本（`{panelId, source}` 单一 state）；切/换/清三态走查全过；顺手把 en 行硬编码的全角「：」改为 locale 键 `capCoverageColon`。
+
+### 4. R6 工程项
+
+- **渠道去重 Set 化**：`strippedUsed` Set 替代 `[...finalNameOf.values()].includes()`；回归 = preset:fetch 重跑，产物 diff 仅日期头 + models.dev 当日新增 2 条（gpt-daybreak-*），去重计数 22/16/131/23 与旧基线全等。
+- **IAB 输入管线排查（翻案）**：document 捕获监听记录 pointerdown/click/keydown（clientX/Y、target、isTrusted），三组实验：①Playwright locator 点 Continue——完整 trusted 事件序列落在按钮中心 (852,486)，对话框关闭；②设置对话框内 locator 点 Relay——同上，区块切换成功；③cua 坐标点「+ Add panel」——trusted 序列落点 (956,340)，create 卡展开。**结论：0.6.0 的「dsh 拦截 locator/IAB 事件」不复现**；本会话唯一可复现的失败是（a）未关闭的删除 Modal 遮罩（`_mask_` aria-hidden）导致 actionability 判定 covered-by-mask——属正常遮挡非拦截，（b）IAB `fill('')` 空串不改 DOM（值原样保留），清空输入需原生 setter + input 事件（工具层怪癖，已记 AGENTS §6）。0.6.0 当时现象归因：宿主版本临时缺陷 + 遮遮挡混杂误判。**标准走查路径回归 IAB 优先**，CDP（tests/walkthrough/cdp.mjs）用于截图与脚本化。
+- **RPC envelope 逆向定案**：宿主侧 `packages/api/gateway/src/index.ts` `remoteRequest()` 要求 payload 恰好一个 plain-object `args` 字段；envelope `{type:'client-request', rpcId, method, payload:{args}}`（`packages/client/connection/src/rpc-schema.ts` zod）；settings-controller `namespaceView()` 把 secrets 投影为 `{path[], set}` sidecar。走查直接 fetch describe：relay 视图 `valueHasTokenPlaintext=false`、`anySkPrefix=false`、`secretPaths=[panels.mocka.accessToken, panels.topn.accessToken]`（均 set:true）——替代 0.6.0 五重证据链的直接集成断言成立。
+- **走查/截图脚本入库**：`tests/walkthrough/cdp.mjs`（零依赖 CDP：eval awaitPromise/click 先 instant 滚动+elementFromPoint 校验再 Input.dispatchMouseEvent、miss 落 domClick 兜底/shot；launchChrome 私有 user-data-dir）+ `shot.mjs` + README（含 why-CDP 与约定）；不进 npm pack files。
+
+### 5. 真实账号只读验证（隔离 home，真实 home 零写入）
+
+- 真实面板配置**文本级**复制进 `.tmp/wt-home`（凭据同样；隔离 home 0600 保持），懒加载实测、连接测试 OK、Use 真实 key（写路径只落隔离 home）：同步 11 模型 **全 L0 精确命中**（claude-fable-5 / opus-4-5→4-8 / opus-5、5-5 / sonnet-4-6、5 等），真实刷新预置 143 条（delta +1/−1）。验证后隔离 home 内的真实面板条目与凭据已清除；真实 home 只读未动（settings.yaml 无 capabilityPresetDelta、panels 原样）。
+- **教训（PyYAML 毁键）**：用 Python yaml 往返 dsh 手写的 settings.yaml 会把 YAML 1.1 布尔键 `off:` 解析成 `False` 写回 `'False'`，pi-ai 严格校验拒绝 → **整个 llm-pi-ai namespace 拒绝注册**（表现：`settings namespace "llm-pi-ai" is not registered`，catalogWarning 提示但模型列表照常返回）。修复 = 以 dsh 原文文本级操作（不经过任何 YAML 解析器）。另：本会话曾把同一面板条目重复插入三次导致 DUPLICATE_KEY 拒载——文本级操作务必幂等。
+- **dsh 语言偏好**：`locale.preference` 服务端持久化（settings.yaml）；headless Chrome（zh-CN accept-language）无存储偏好时，壳在异步采纳浏览器语言前插件区可能短暂按 en 渲染——走查截图前先在语言菜单点一次目标语言（`force-lang.mjs` 流程），之后稳定。
+
+### 6. 质量门与收尾
+
+- typecheck / vitest 210 / build 全绿；client 104KB ≤350KB；哨兵审计零命中（SPEC-0.6.1 加入 FILES 清单）；npm pack 只含 lib + cordis.patch.yml + README + CHANGELOG。
+- 截图 6 张 × 中英重拍（1440×913）：手风琴折叠态（connection）、展开 keys、模型三计价、双轴+Top-N 看板、日志两行筛选、能力页（增量状态行）；screenshots.json 清单未变。
+- 已知小改进（未做）：面板列表懒加载账户行在 revision bump 时会整组重拉（宿主 5s 缓存兜底，实际无风暴）；删除 Modal 的 defaultModelTarget 在 RPC 直写场景需刷新页面（UI 正常操作不受影响）。
+\n## 2026-09-28（v0.6.0 — 多套中转站 + 主流预置基线 + maxTokens + SVG 图表）
 
 > 按 docs/SPEC-0.6.0.md 实施（R1-R7 全部落地）。本条目只记研究结论、关键决策与偏离；逐条验收见 SPEC §12 DoD。
 

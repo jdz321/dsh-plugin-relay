@@ -54,6 +54,7 @@ npm publish        # prepublishOnly 会先跑 typecheck + build
 - dsh-market 详情页直接读 `screenshots.json`；README 内嵌的图会被市场自动抽取兜底。
 - 图片实际由 GitHub 托管（raw.githubusercontent.com），第三方图床会被拒。
 - **截图一律用 mock 面板的虚构数据**（mock 面板 + 隔离 home），不得出现任何真实面板地址、账号、key 名称或余额。
+- 重拍流程（v0.6.1 起）：`tests/walkthrough/cdp.mjs`（零依赖 CDP 驱动）驱动隔离实例（`node scripts/dev.js --dsh-home <临时目录> --port 3198 --no-open` + mock 面板），中英两轮（dsh 语言偏好服务端持久化，切语言在设置 → 通用 → Language 菜单点选后重载）；六张 = connection（折叠手风琴）/ keys / models / dashboard（双轴）/ logs / capabilities。
 
 ## 6. 宿主兼容（每次升级 dsh 开发依赖后必做）
 
@@ -69,6 +70,7 @@ npm publish        # prepublishOnly 会先跑 typecheck + build
 - [ ] **每周自动**：`preset-refresh` workflow（每 7 天，cron 在 workflow 顶部可改）跑 `preset:fetch` 与已提交基线 diff，有漂移自动开 PR 供审阅——**不自动合并**。v0.6.0 起基线是**纯 models.dev 主流口径**（第一方白名单 / 365 天窗口 / 非对话剔除 / 渠道去重），workflow diff 即纯数据漂移，无过渡期噪声。
 - [ ] 主流模型发布潮后也可手动跑 `npm run preset:fetch`（只读 models.dev，全程无凭据、不触碰任何面板），diff 产物 `src/knowledge-preset.generated.ts` 并随代码一起提交。
 - [ ] 生成文件头部只允许 models.dev 日期与计数——**不得**出现面板地址、账号等任何身份信息。
+- [ ] v0.6.1 起用户的「刷新预置」结果以 `capabilityPresetDelta` 增量持久化并**叠加在新基线上**（用户刷新意图优先）；README「Known limitations」已记录该权衡，「恢复基线」是一键出口——发版说明无需额外动作。
 
 ## 8. 发版节奏（后续版本，自动化后；commit 由开发会话执行，push 一律由维护者确认审计后手动完成）
 
