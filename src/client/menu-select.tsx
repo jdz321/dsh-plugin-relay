@@ -8,7 +8,7 @@
 
 import { useState } from 'react'
 
-import { IconChevronDownOutline14, Menu } from '@deepseek-ai/dsh-client-ui-primitives'
+import { IconChevronDownOutlineMedium, Menu } from '@deepseek-ai/dsh-client-ui-primitives'
 
 export interface MenuSelectItem {
   id: string
@@ -51,7 +51,7 @@ export function MenuSelect({ value, placeholder, items, onSelect, disabled = fal
           onClick={() => { setOpen((v) => !v) }}
         >
           <span className={current ? 'relay_selectAnchorValue' : 'relay_selectAnchorValue relay_selectAnchorPlaceholder'}>{current ? current.label : placeholder}</span>
-          <IconChevronDownOutline14 className="relay_selectChevron" />
+          <IconChevronDownOutlineMedium className="relay_selectChevron" />
         </button>
       )}
     />

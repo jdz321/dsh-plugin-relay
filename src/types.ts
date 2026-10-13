@@ -3,6 +3,13 @@
  * official packages ship no type declarations, so these describe exactly the
  * surface we call — nothing more — and are verified against the runtime in
  * tests and browser acceptance.
+ *
+ * dsh ≥0.2.1 model: a plugin's persisted state lives in its composition
+ * entry's config (the profile patch). The host `settings` service
+ * (`ctx.settings`, the settings-forms service) reads/writes entries by ENTRY
+ * id; fields the plugin's Config schema declares `.volatile()` are editable
+ * without a plugin reload and arrive in `apply(ctx, config)` as live cell
+ * references (`.get()` re-reads after every hot update).
  */
 
 /** Schema value type: schemastery schemas are callable validators. */
@@ -11,57 +18,96 @@ export interface SchemaType<T = unknown> {
   /** schemastery builder surface we rely on. */
   role(tag: string): SchemaType<T>
   default(value: T): SchemaType<T>
+  /** Mark a field hot-editable: writes never restart the plugin fiber. */
+  volatile(): SchemaType<T>
 }
 
-/** What installSection needs of a schema: a callable validator. */
+/** What the host needs of a plugin Config schema: a callable validator. */
 export type SchemaLike = (data: never) => unknown
 
 /** Consumer context of a host plugin (cordis). */
 export interface HostContext {
   inject(deps: readonly string[], callback: (ctx: HostContext) => void): void
+  /** Register a disposable that dies with this plugin's fiber. */
+  effect(fn: () => (() => void) | void, label?: string): void
+  on(event: string, listener: (...args: never[]) => void): void
   logger: {
     info(message: string, ...args: unknown[]): void
     warn(message: string, ...args: unknown[]): void
     error(message: string, ...args: unknown[]): void
   }
+  /** The plugin's own fiber; `entry.options.id` is this instance's entry id. */
+  fiber?: {
+    entry?: { options?: { id?: string } }
+  }
 }
 
-/** One `settings.mutate` path operation. */
+/** A live volatile config cell handed to `apply` for each `.volatile()` field. */
+export interface VolatileRef<T> {
+  get(): T
+}
+
+/**
+ * The resolved plugin config as `apply(ctx, config)` receives it: every
+ * volatile field of the Config schema is a cell, updated in place when the
+ * entry config changes without a reload.
+ */
+export interface RelayConfigCells {
+  panels: VolatileRef<Record<string, unknown> | undefined>
+  capabilityCatalog: VolatileRef<Record<string, unknown> | undefined>
+  capabilityOverrides: VolatileRef<Record<string, Record<string, unknown> | undefined> | undefined>
+  capabilityPresetDelta: VolatileRef<unknown>
+}
+
+/** One path-addressed edit (`set` writes / creates, `unset` removes). */
 export interface SettingsPathOp {
   op: 'set' | 'unset'
   path: string[]
   value?: unknown
 }
 
-/** One namespace descriptor as returned by `settings.describe()`. */
-export interface SettingsDescriptor {
+/**
+ * One entry descriptor as the host settings service describes it. `value` is
+ * the resolved entry config projected to its volatile fields (secrets
+ * included unless the caller asked for redaction); `user` is the raw profile
+ * patch layer when one exists.
+ */
+export interface HostNamespaceView {
   ns: string
   revision: number
   value: unknown
+  user?: unknown
 }
 
 /**
- * The settings service (`ctx.settings`). `get` returns the resolved value
- * (schema defaults + composition base + user layer); `section` returns the
- * raw stored user section; writes are queued per namespace and must be
- * awaited before a request handler responds.
+ * The HOST settings service (`ctx.settings`): form projection over every
+ * composition entry's Config schema. Writes land in the profile patch and
+ * reconcile volatile-only changes without a plugin reload. Every write must
+ * be awaited before a request handler responds.
+ */
+export interface HostSettingsService {
+  /** Register this instance's page policy (`{auto: false}` = we draw our own page). */
+  configure(presentation: { auto?: boolean }, owner?: unknown): () => void
+  /** Every configurable entry's current view, keyed by `ns` (the entry id). */
+  describe(options?: { redactSecrets?: boolean }): HostNamespaceView[]
+  /** Merge fields into an entry's config (objects deep-merge, arrays replace). */
+  update(ns: string, patch: Record<string, unknown>, expectedRevision?: number): Promise<void>
+  /** Apply path ops without restating redacted secrets. */
+  mutate(ns: string, ops: SettingsPathOp[], expectedRevision?: number): Promise<void>
+}
+
+/**
+ * The plugin-side store facade every internal module consumes: the same
+ * read/write shape the plugin used before dsh 0.2.x, now implemented over
+ * volatile cells (own namespace) and the host describe view (foreign
+ * namespaces). `get` returns resolved values; `section` the raw user layer.
  */
 export interface SettingsService {
   get(ns: string): unknown
   section(ns: string): Record<string, unknown> | undefined
   update(ns: string, patch: Record<string, unknown>, expectedRevision?: number): Promise<void>
   mutate(ns: string, ops: SettingsPathOp[], expectedRevision?: number): Promise<void>
-  describe(options?: { redactSecrets?: boolean }): SettingsDescriptor[]
-  installSection(
-    owner: HostContext,
-    ns: string,
-    schema: SchemaLike,
-    entry: Record<string, unknown>,
-    hooks: {
-      setSource: (current: unknown) => void
-      onChange: () => void
-    },
-  ): void
+  describe(options?: { redactSecrets?: boolean }): HostNamespaceView[]
 }
 
 /** Resolution result of a credential reference. */
@@ -101,6 +147,7 @@ export interface RouteProfile {
   modelOverrides?: Record<string, RouteModelEntry>
   defaultContextWindow?: number
   defaultMaxTokens?: number
+  defaultInput?: string[]
   [field: string]: unknown
 }
 

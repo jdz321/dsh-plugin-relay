@@ -1,7 +1,7 @@
 {
   "name": "dsh-plugin-relay",
-  "version": "0.6.1",
-  "description": "DeepSeek Harness (dsh) plugin that routes model traffic through new-api-family relay panels (one-api / new-api / Veloera / done-hub / ...) — several panels at once, each its own model provider: manage panels (accordion with inline keys / models / dashboard / logs tabs), create / edit / delete and switch API keys, sync each key's model list with pricing, review usage dashboard (dual-axis) and logs, and configure model capabilities from a mainstream-model knowledge base — all from the dsh web settings page",
+  "version": "0.7.0",
+  "description": "DeepSeek Harness (dsh) plugin that routes model traffic through new-api-family relay panels (one-api / new-api / Veloera / done-hub / ...) — several panels at once, each its own model provider: manage panels (accordion with inline keys / models / dashboard / logs tabs), create / edit / delete and switch API keys, sync each key's model list with pricing, review usage dashboard (dual-axis) and logs, and configure model capabilities from a mainstream-model knowledge base — all from the dsh Plugins settings page",
   "type": "module",
   "license": "MIT",
   "repository": {
@@ -32,8 +32,9 @@
     "client": {
       "platform": "web",
       "inject": [
+        "@deepseek-ai/dsh-client-locale",
         "@deepseek-ai/dsh-client-ui-settings",
-        "@deepseek-ai/dsh-client-locale"
+        "@deepseek-ai/dsh-client-ui-plugin-manager"
       ]
     }
   },
@@ -46,12 +47,12 @@
     "prepublishOnly": "npm run typecheck && npm run build"
   },
   "peerDependencies": {
-    "@deepseek-ai/schemastery": "^3.18.2"
+    "@deepseek-ai/schemastery": "~3.18.5-alpha.1"
   },
   "devDependencies": {
-    "@deepseek-ai/dsh": "^0.1.5-rc.2",
-    "@deepseek-ai/dsh-client-ui-primitives": "0.1.5-rc.2",
-    "@deepseek-ai/schemastery": "^3.18.2",
+    "@deepseek-ai/dsh": "0.2.1-alpha.2",
+    "@deepseek-ai/dsh-client-ui-primitives": "0.2.1-alpha.2",
+    "@deepseek-ai/schemastery": "3.18.5-alpha.1",
     "@types/node": "^24.0.0",
     "@types/react": "^18.3.0",
     "react": "^18.3.1",
@@ -62,7 +63,7 @@
   },
   "engines": {
     "node": ">=20",
-    "dsh": ">=0.1.5-rc.2"
+    "dsh": ">=0.2.1-alpha.2"
   },
   "keywords": [
     "dsh",

@@ -23,7 +23,7 @@
  */
 
 import { useEffect, useMemo, useState } from 'react'
-import { Button, IconChevronDownOutline14, Modal, Pill, Switch, Tag } from '@deepseek-ai/dsh-client-ui-primitives'
+import { Button, IconChevronDownOutlineMedium, Modal, Pill, Switch, Tag } from '@deepseek-ai/dsh-client-ui-primitives'
 
 import { EFFORT_LEVELS, MAX_TOKENS_MAX, MODALITIES } from '../constants.js'
 import { apiGet, apiPost } from './api.js'
@@ -374,7 +374,7 @@ export function CapabilitiesView({ t, caps, refreshCaps, onMessage }: Capabiliti
             <div className="relay_capSection">
               <details className="relay_presetDetails">
                 <summary className="relay_presetSummary">
-                  <IconChevronDownOutline14 className="relay_presetChevron" />
+                  <IconChevronDownOutlineMedium className="relay_presetChevron" />
                   {t('capPresetCount')(presetEntries.length)}
                 </summary>
                 <div className="relay_presetBody">

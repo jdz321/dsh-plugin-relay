@@ -2,15 +2,17 @@
 #
 # The only row here mounts the host plugin. Everything panel-specific — the
 # per-panel pi-ai route profiles (baseURL, key reference, model catalog) and
-# the default model — is written at runtime into the user's settings document
-# (`llm-pi-ai:` / `relay:` sections, both hot-reloaded) when a panel is added,
-# a key is picked, or a capability is saved. dsh-base already mounts llm-pi-ai
-# dormant with zero routes; each panel's route materializes on its first key
-# use and follows the panel's connection settings from then on.
+# the default model — is written at runtime into the active profile's patch
+# document (the `relay` and `llm-pi-ai` entries' config, hot-reloaded through
+# the volatile schema fields) when a panel is added, a key is picked, or a
+# capability is saved. dsh-base already mounts llm-pi-ai dormant with zero
+# routes; each panel's route materializes on its first key use and follows
+# the panel's connection settings from then on.
 #
-# Values below are the composition `base` of the plugin's settings namespace;
-# the settings page and settings.yaml override them per field without a
-# restart. No defaults name any particular panel.
+# The row carries no config: the entry's whole state is user-layer (the
+# profile patch), editable per field without a restart (all Config fields are
+# `.volatile()`). No defaults name any particular panel. The entry id `relay`
+# doubles as the settings namespace the client page edits.
 
 - insert:
     - id: relay

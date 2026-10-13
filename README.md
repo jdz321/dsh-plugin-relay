@@ -2,7 +2,7 @@
 
 # dsh-plugin-relay
 
-A [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (`dsh`) plugin that connects dsh to any **new-api-family relay panel** (one-api / new-api / Veloera / done-hub / ...). Everything lives in the dsh web settings page — no CLI, no config files to hand-edit, and no panel-specific defaults baked in. Since v0.6.0 you can connect **several panels at once** — each one is its own model provider inside dsh, selectable side by side in the model picker.
+A [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (`dsh`) plugin that connects dsh to any **new-api-family relay panel** (one-api / new-api / Veloera / done-hub / ...). Everything lives in dsh's **Plugins panel** — no CLI, no config files to hand-edit, and no panel-specific defaults baked in. Since v0.6.0 you can connect **several panels at once** — each one is its own model provider inside dsh, selectable side by side in the model picker.
 
 ![API keys](assets/screenshot-keys.png)
 
@@ -27,7 +27,7 @@ A [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (`dsh`) pl
 
 ## Install
 
-Requires Node ≥ 20 and pnpm on PATH (dsh installs plugins through pnpm).
+Requires dsh ≥ 0.2.1-alpha.2, Node ≥ 20, and pnpm on PATH (dsh installs plugins through pnpm).
 
 ```sh
 # from npm (once published)
@@ -38,7 +38,7 @@ npm install && npm run build
 dsh plugin --profile web add /path/to/dsh-plugin-relay
 ```
 
-Install into the `headless` profile the same way (`--profile headless`) if you use headless sessions. Then restart `dsh web` and open **Settings → Relay**.
+Install into the `headless` profile the same way (`--profile headless`) if you use headless sessions. Then restart `dsh web` and open the **Plugins** panel → **Relay**.
 
 ## Usage
 
@@ -50,11 +50,11 @@ Install into the `headless` profile the same way (`--profile headless`) if you u
 
 ## How it works
 
-- The plugin registers a `relay` settings namespace holding a `panels` dict (each panel's connection fields; the access token is a secret field redacted on the wire), the global knowledge base, and per-panel override groups; it serves `/api/relay/{state,panels,panels-create,panels-delete,account,connection-test,keys,keys-create,keys-update,keys-delete,use,models,capabilities,model-info,knowledge-refresh,preset-restore,dashboard,logs,logs-stat,logs-meta}` inside dsh's authenticated web fence.
-- On first key switch per panel it writes the panel's pi-ai route profile (`api: openai-completions`, `baseURL: <panel>/v1`, `apiKeyEnv: RELAY_API_KEY_<PANEL>`, merged model catalog) into dsh's settings — dsh hot-reloads routes, so no restart. The API key itself resolves per request from the panel's credential reference.
+- The plugin's state is its composition entry's config (a `panels` dict with each panel's connection fields — the access token is a secret field redacted on the wire — plus the global knowledge base and per-panel override groups; all fields are hot-editable `.volatile()` fields of the profile patch), it serves `/api/relay/{state,panels,panels-create,panels-delete,account,connection-test,keys,keys-create,keys-update,keys-delete,use,models,capabilities,model-info,knowledge-refresh,preset-restore,dashboard,logs,logs-stat,logs-meta}` inside dsh's authenticated web fence.
+- On first key switch per panel it writes the panel's pi-ai route profile (`api: openai-completions`, `baseURL: <panel>/v1`, `apiKeyEnv: RELAY_API_KEY_<PANEL>`, merged model catalog) into the `llm-pi-ai` entry's config — dsh hot-reloads routes, so no restart. The API key itself resolves per request from the panel's credential reference.
 - Catalog sync merges by model id: manual edits of surviving ids are preserved; ids the key lost are removed, so dsh only offers models the key can call. Capability fields on the entries are **derived state**: each sync, each capability save, and each preset refresh replays the overrides → knowledge base (yours first, then the preset layer) over them. Only fields the plugin holds config for are written — anything you edit on the official Models page for unconfigured ids survives.
 - Capability saves are **directed operations** (`catalogSet` / `catalogDelete` / `overrideSet` / `overrideDelete` with the owning panel) applied as per-entry settings path ops — deletions are real, not masked by deep merges — followed by revision-guarded replays over the affected route catalogs.
-- The preset knowledge base is generated at build time by `npm run preset:fetch` (models.dev first-party whitelist, 365-day release window, non-dialogue models excluded, channel re-registrations deduped; optional OpenRouter usage backstop with `OPENROUTER_API_KEY`) and committed into the source; the *Refresh presets* button rebuilds it from a live models.dev fetch and **persists the difference against the compiled baseline** as the `capabilityPresetDelta` settings key — replaying the derivation into every configured route immediately. The delta survives restarts (it keeps applying over whatever baseline the installed plugin ships); *Restore baseline* (or deleting the settings key) is the only way back to the compiled form.
+- The preset knowledge base is generated at build time by `npm run preset:fetch` (models.dev first-party whitelist, 365-day release window, non-dialogue models excluded, channel re-registrations deduped; optional OpenRouter usage backstop with `OPENROUTER_API_KEY`) and committed into the source; the *Refresh presets* button rebuilds it from a live models.dev fetch and **persists the difference against the compiled baseline** as the `capabilityPresetDelta` config field — replaying the derivation into every configured route immediately. The delta survives restarts (it keeps applying over whatever baseline the installed plugin ships); *Restore baseline* (or deleting the settings key) is the only way back to the compiled form.
 
 ## Security notes
 

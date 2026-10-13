@@ -2,7 +2,7 @@
 
 > 本文件写给接手本项目的 AI 编码会话（也适用于新同事）：读完这一份即可安全开工。
 > 配套文档：README.md / README.zh.md（面向使用者的安装与使用）、docs/WORKLOG.md（逐版本开发日志）、docs/PUBLISHING.md（发布与上架清单）。
-> 生态背景：宿主是 DeepSeek Harness（npm 包 `@deepseek-ai/dsh`，下称 dsh）；本仓库是一个发布为 npm 包的 dsh 宿主插件，无 CLI，全部功能在 dsh web 设置页。
+> 生态背景：宿主是 DeepSeek Harness（npm 包 `@deepseek-ai/dsh`，下称 dsh）；本仓库是一个发布为 npm 包的 dsh 宿主插件，无 CLI，全部功能在 dsh 的 **Plugins 面板**（0.2.x 的插件配置页宿主；宿主要求 ≥0.2.1-alpha.2）。
 
 ## 0. 红线 —— 违反任何一条都会伤到用户环境，动手前先读
 
@@ -47,6 +47,7 @@
 │  ├─ pricing.ts       # /api/pricing 归一化（三计价口径 + 分组倍率 + vendors）
 │  ├─ catalog.ts       # 目录整形与合并（name=id；同步保留既有字段）
 │  ├─ route-config.ts  # llm-pi-ai 路由 profile 读写（修订守卫重试、能力字段级合并、unsetRoute）
+│  ├─ store.ts         # PluginStore：宿主 settings-forms 服务 + volatile cells → 旧 get/section/update/mutate 门面
 │  ├─ capabilities.ts  # models.dev 客户端（映射/合并/缓存/单飞/refresh；limit.context+limit.output）
 │  ├─ knowledge.ts     # 知识库/覆盖/预置派生规则（matchCatalogName L0-L5、KnowledgeConfig/KnowledgeView）
 │  ├─ knowledge-preset.ts             # 预置构建纯逻辑（主流口径；脚本与运行时共用；白名单/窗口/去重在此）
@@ -76,7 +77,7 @@ npm start          # 开发启动：dsh web --port 3098，DSH_HOME 强制 = <仓
 npm run preset:fetch   # 拉 models.dev 重新生成 src/knowledge-preset.generated.ts（主流基线：白名单/365 天/非对话剔除/渠道去重；OPENROUTER_API_KEY 可选兜底；面板不再是数据源。纯 codegen 不 build——产物同步走手动 build / prepublishOnly / CI；脚本经 scripts/ts-resolver.mjs 直跑 src，需 Node ≥22.18）
 ```
 
-改动 src/ 后必须 `npm run build`，再重装/重链 profile；正在运行的 dsh 实例要重启才会加载新宿主产物（client 产物刷新页面即可）。
+改动 src/ 后必须 `npm run build`，再重装/重链 profile；正在运行的 dsh 实例要重启才会加载新宿主产物（client 产物刷新页面即可；0.2.x volatile 写不会重启插件 fiber，宿主产物变更必须重启）。
 
 把本地改动装进某个 home 的 profile（dsh 的插件安装走 pnpm，需在 PATH）：
 
@@ -87,26 +88,29 @@ DSH_HOME="$PWD/.dsh-home" node_modules/.bin/dsh plugin --profile web add "$PWD"
 
 ## 4. dsh 集成语义（改代码前必读，全是踩过的坑）
 
-### 4.1 settings 写入是排队串行异步（最重要的一条）
+### 4.1 配置模型（0.2.x）：entry config + volatile 热提交（最重要的一条）
 
-`settingsService.update(ns, patch)`（`@deepseek-ai/dsh-settings`）把写操作挂到该 namespace 的串行队列（validate → persist → `document[ns]` → commit），返回 promise。**HTTP 处理器里每一个 update 都必须 `await` 完再返回响应**——客户端在响应落地后立刻 refetch，未 await 的写入会输给这次读取。`credentialsService.set` 同为 enqueue 语义，照 await 不误。
+dsh ≥0.2.1 没有「settings namespace」了：每个 composition entry（`cordis.patch.yml` 的 insert 行）自带一份 config，用户层落在 **profile patch 文档**（`profiles/<name>/cordis.patch.yml`）。`ctx.settings`（settings-forms 服务）按 **entry id** 寻址：`update(ns, patch)`（对象深合并、数组整体替换）/ `mutate(ns, ops, expectedRevision?)`（path 级 set/unset）/ `describe()`（每 entry 的 `{ns, revision, value, user, secrets?}` 视图）。没有 `get`/`section`/`installSection`——插件自己的状态通过 `apply(ctx, config)` 收到的 **volatile cell** 读（`.get()` 恒最新）。
 
-- `update` 深合并对象、**数组整体替换**；`mutate(ns, ops, expectedRevision?)` 支持 path 级 set/unset，**path 只能寻址 plain object，数组只能作为整体 set**。
-- `get(ns)` 返回**resolved 值**（schema 默认 + composition base + 用户层）：schemastery 会把缺省数组具体化为 `[]`、dict/object 具体化为 `{}`——**把 resolved 值原样写回去会带进这些空壳**，写回前必须清洗（见 `catalog.ts` 的 `cleanModelEntry`，compat 里空值成员也要剪）。
-- **同一路径只能注册一条 fetch 路由**：`registerFetchRoute` 遇到重复 path 直接 throw，且会中断整个 inject 回调（之后的路由全部没挂上，浏览器表现为神秘 404）。要一个路径多方法，就 `methods: ['GET','POST']` 一次注册、handler 里按 `request.method` 分支。
-- 修订守卫：`mutate` 第三参传 `describe()` 里读到的 revision，不匹配抛 `SETTINGS_CONFLICT`（`code: 'SETTINGS_CONFLICT'`）。对「读-改-写共享结构」（如 models 数组）必须带守卫并重试（见 `route-config.ts` 的 `guardedMutate`，重试 3 次）。
+- **可写性 = schema 声明 `.volatile()`**：`update/mutate/replace` 只允许写 volatile 字段之下的路径（否则抛 `Config field … is not volatile`）；且 describe() 只投影 volatile 字段。本插件四个顶层字段全部 volatile；`llm-pi-ai` 的 `providers`、`agent-default-model` 的全部字段在宿主侧已是 volatile。
+- **volatile 写不重启插件**：写走 `configEditor.edit` → loader 对比，volatile-only 差异 → `fiber._config` 原地替换 + cell 原地更新 + 本 fiber 收 `loader/volatile-update`；普通字段差异才会重载 fiber。pi-ai 靠同一事件热重注册路由。
+- **宿主服务侧读**：`describe()` 不带 `redactSecrets` 时 value 含 secret 明文（仅限宿主内用）；`user` 是 profile patch 原始层。schemastery 依旧把缺省数组/dict 具体化为 `[]`/`{}` 壳（volatile cell 里也一样），写回前必须清洗（`catalog.ts` 的 `cleanModelEntry`；`normalizePresetDelta` 拒绝 `{builtAt}` 缺失的壳）。
+- **插件侧封装**：`src/store.ts` 的 `PluginStore` 恢复了旧的 `get/section/update/mutate/describe` 门面——own ns 读 cell，外部 ns（`llm-pi-ai`、`agent-default-model`）读 describe 视图并按 entry 缓存，由根上下文的 `settings/document-updated` 事件失效。内部模块（route-config/capability-ops/panels-ops/refresh）只认这个门面，测试用 `tests/fake-settings.ts` 直接顶上。
+- **HTTP 处理器里每一个写都必须 `await` 完再返回响应**——客户端在响应落地后立刻 refetch，未 await 的写入会输给这次读取（`credentialsService.set` 同为 await 语义；新版空串 value 会被拒）。`mutate` 的 unset 在 base 层有值时回退为「重置为 base」——llm-pi-ai 与 relay 的 base 都是空配置，unset 即真删。
+- **同一路径只能注册一条 fetch 路由**：`registerFetchRoute`（`connection.fetch.register` 同物）遇重复 path 直接 throw，且会中断整个 inject 回调。要一个路径多方法，就 `methods: ['GET','POST']` 一次注册、handler 里按 `request.method` 分支。
+- 修订守卫：`mutate` 第三参传 `describe()` 里读到的该 entry revision，不匹配抛 `SETTINGS_CONFLICT`（`code` 不变）。对「读-改-写共享结构」（models 数组）必须带守卫并重试（`route-config.ts` 的 `guardedMutate`，重试 3 次）。
 
 ### 4.2 credentials-local 的解析层级
 
-`resolve(ref)`：**启动环境变量（只读，最优先）→ 文件 store（`.credentials.yaml`）→ dotenv 回退**。若启动 env 导出了凭据引用同名变量，它只读遮蔽文件值，此时 `set` 会被 `assertUnshadowed` 拒绝（dsh 固定行为）。空串值视同不存在。注意 `.credentials.yaml` 的 `refs:` 段 dsh 会写成 **flow-style**（`{ KEY: value }`），程序化读取别假设 block 风格。**程序化编辑 home 内文件必须保住文件权限**：credentials-local 启动与热重载都断言 `.credentials.yaml` 为 0600（`assertOwnerOnly`，非属主只读即拒绝加载、整个 dsh 起不来）；「写临时文件再 rename」会让新文件落入 umask 的 0644——改完必须 `chmod 600`（settings.yaml 同理保持 600）。
+`resolve(ref)`：**启动环境变量（只读，最优先）→ 文件 store（`.credentials.yaml`）→ dotenv 回退**。若启动 env 导出了凭据引用同名变量，它只读遮蔽文件值，此时 `set` 会被 `assertUnshadowed` 拒绝（dsh 固定行为）。空串值视同不存在。注意 `.credentials.yaml` 的 `refs:` 段 dsh 会写成 **flow-style**（`{ KEY: value }`），程序化读取别假设 block 风格。**程序化编辑 home 内文件必须保住文件权限**：credentials-local 启动与热重载都断言 `.credentials.yaml` 为 0600（`assertOwnerOnly`，非属主只读即拒绝加载、整个 dsh 起不来）；「写临时文件再 rename」会让新文件落入 umask 的 0644——改完必须 `chmod 600`。0.2.x 的用户配置层是 profile patch（`profiles/<name>/cordis.patch.yml`），旧 `settings.yaml` 由宿主启动时一次性导入并改名 `.imported`。
 
 ### 4.3 挂载链（谁把插件带起来）与路由建立
 
 - `package.json` 的 `dsh.bundle.patch: ./cordis.patch.yml`：patch 只有一行——`- insert: - {id: relay, name: dsh-plugin-relay, config: {relayKind, route, keyRef}}`，作为 `relay` namespace 的 composition base。dsh-base 自带 `llm-pi-ai`（零路由休眠）与 `agent-default-model` 的挂载行，**本插件不 patch 它们**。
 - **pi-ai 路由由插件在运行时建立**：首次 `/use` 用一次 `settings.update` 写入 `llm-pi-ai.providers.<route>`（api=openai-completions、baseURL=<连接>/v1、apiKeyEnv=<keyRef>、models=合并目录）。**自定义路由没有 models 列表无法通过 pi-ai 的严格校验，所以不存在「空路由骨架」**——连接保存只镜像已存在路由的连接字段（`ensureRouteProfile`），绝不创建路由。
 - **`modelOverrides` 对本插件不可用**：pi-ai 源码规定 `modelOverrides` 在「带 models 列表的路由」与「内置目录未描述的路由」上都直接 invalid——中转站路由两者皆是。能力配置因此落在 models 条目自身的 `input`/`reasoningEfforts` 字段上（与官方「模型」页同一份条目），字段级合并由 `route-config.ts` 的「读-改-写 + 修订守卫」保证。**语义边界：能力配置跟随条目存在；切换 key 使模型离开目录时，其能力配置随条目一并移除（该模型已不可调用）；同一 key 内的任何同步/刷新永不冲掉存活模型的能力配置与手工字段。**
-- `index.ts` 的 `apply(ctx)`：`ctx.inject(['settings','credentials'])` 里 `installSection` 注册 `relay` namespace（令牌 `role('secret')`）；`ctx.inject(['connection'])` 挂 `/api/relay/*` 路由。全部随插件 fiber 卸载。
-- `client/index.tsx` 经 `window.__ModuleLoader__.load({id, factory})` 注入（tsdown banner/intro/footer 包裹）；`ctx.slots.inject('settings.section', …)` 挂设置区（内部自绘六选项卡）；React 18 与 primitives 由宿主供给（client 产物 externals = react 系 + `@deepseek-ai/dsh-client-ui-primitives`，见 §4.6）。React 18 的 useEffect 依赖里**不要放每次渲染都换 identity 的对象**（否则本地草稿会被重建吞掉）。
+- `index.ts` 的 `apply(ctx, config)`：`config` 即 entry 配置的 volatile cells；`ctx.inject(['settings','credentials'])` 里 `settings.configure({auto:false}, ctx.fiber)` 关掉宿主自动生成的配置页、构造 `PluginStore`，并挂 `settings/document-updated`（外部缓存失效）与 `loader/volatile-update`（路由镜像）两个事件；`ctx.inject(['connection'])` 挂 `/api/relay/*` 路由。entry id 经 `ctx.fiber.entry.options.id` 读取（回落 `relay`）。全部随插件 fiber 卸载。
+- `client/index.tsx` 经 `window.__ModuleLoader__.load({id, factory})` 注入（tsdown banner/intro/footer 包裹，0.2.x 官方 client 同款）；页面挂 **Plugins 面板的 `plugins.item` slot**（见 §4.5）；client inject = `['slots','locale','configForms']`（`configForms` 由 `@deepseek-ai/dsh-client-ui-settings` 提供，提供 entry 的表单快照与写通道）；React 18 与 primitives 由宿主供给（client 产物 externals = react 系 + `@deepseek-ai/dsh-client-ui-primitives`，见 §4.6）。React 18 的 useEffect 依赖里**不要放每次渲染都换 identity 的对象**（否则本地草稿会被重建吞掉）。
 - **内嵌 webview 会吞 `window.prompt/confirm`**：一切需要确认的交互用 primitives `Modal`（React 组件，可用）或内联控件；不再用两段式按钮。
 
 ### 4.4 接口信任围栏
@@ -115,13 +119,22 @@ DSH_HOME="$PWD/.dsh-home" node_modules/.bin/dsh plugin --profile web add "$PWD"
 
 ### 4.5 设置页 slot 契约
 
-`settings.section` slot 的注册形状：`ctx.slots.register({name:'settings.section', id:'relay', order:12, label:()=>t('nav'), inject}, Component)`；`inject` 返回 `{scope, t}`，组件经 `props.scope`/`props.t` 消费。locale：`ctx.locale.register(NS, {zh, en})` + `ctx.locale.bind(NS)`；**组件内一律走 bind 出来的翻译函数按当前语言取词**，不要缓存某一语言的字典对象（否则另一语言环境显示错语言）。
+0.2.x 的插件配置页住 **Plugins 面板**。**第三方 npm 插件的页面挂 `plugins.bundle.config`（keyed slot，key = 包名）**，渲染在「已安装」分组里本包详情页的配置区——**不要挂 `plugins.item`**（那是官方 host-plane 插件的 items 列表，挂上去会以卡片形式混进「官方」分组，v0.7.0 首版踩过）：
+
+```tsx
+ctx.effect(() => ctx.configForms.whileServed(['relay'], () =>
+  ctx.slots.inject('plugins.bundle.config', () => ctx.slots.register({
+    name: 'plugins.bundle.config', key: CLIENT_MODULE_ID, inject: env,
+  }, RelaySection))))
+```
+
+`whileServed` 监听 describe 镜像（host 不服务 relay entry 时自动摘除页面）；组件 props = `{view: 'page', ...inject() 返回值}`（bundle.config 只传 `view:'page'`，无 form/无 summary 调用）；状态经 `configForms.get('relay')` 自取（与 plugin-manager 共享同一控制器，快照 `{status, value, revision, writable}`）。**不声明 `locale:` 字段**——否则框架会注入按 `(key, params)=>string` 约束的 t，与本插件「字典值是函数」的翻译器冲突；翻译函数走 `ctx.locale.bind(NS)` 后经 inject 传递。locale：`ctx.locale.register(NS, {zh, en})` + `ctx.locale.bind(NS)`；**组件内一律走 bind 出来的翻译函数按当前语言取词**。`settings.section` slot 仍在，但只属于宿主内置设置分区，第三方插件页不走它。样式注意：`relay_section` **不设 max-width**（旧设置页时代的 760px 上限已删）——Plugins 详情页内容列是自适应宽度（~960px），设置区应与之等宽。
 
 ### 4.6 宿主供给的浏览器模块（primitives 纪律）
 
-- `@deepseek-ai/dsh-client-ui-primitives` 及一切 `@deepseek-ai/dsh-client-ui-*` **不是 npm 依赖**：宿主把「自己那版」编译产物经冻结模块表（`PLATFORM_MODULES`，0.1.5-rc.2 起含 primitives）供给插件 bundle 的裸 `require`。因此 **npm 侧无法表达「primitives API ≥ X」**——兼容策略 = `engines.dsh` 下限（`>=0.1.5-rc.2`，首个模块表含所需键的宿主）+ 只消费**稳定子集** + 升级宿主后重跑浏览器走查（视觉行为 npm 测试覆盖不到）。
-- **稳定子集**（rc.2 存在、经 diff 实证到 0.1.7-rc.1 仍兼容）：`Button` / `Switch`（label 必填）/ `Pill` / `Tag` / `StateDot` / `Menu`（open/anchor/items/selectedId/onSelect/onClose/align/portal）/ `Modal`（closeLabel 必填）+ `IconChevronDownOutline14`。0.1.7 新增件（settings-form、SegmentedControl、Checkbox 等）**不引入**；若未来出现破坏性漂移，在 `client/menu-select.tsx` 这类包装组件内做能力探测收敛，不在业务代码散落 try/catch。
-- 类型：devDependency 装 `@deepseek-ai/dsh-client-ui-primitives`（**精确锁版**，与 `engines.dsh` 下限对应的宿主版本——npm 线与 dsh 同班次发布，`latest` 标签常年停在 rc.1 不代表没发版；升级 dsh 开发依赖时**同步锁步升级本包**）。运行时真源仍是宿主模块表供给的那版，npm 包只供类型；**禁止把 `deepseek-harness/` 源码 import 进产物或 tsconfig**。`tsdown.config.ts` 的 `CLIENT_EXTERNALS` 与 build-shape 测试的 require 白名单都要含该包名。
+- `@deepseek-ai/dsh-client-ui-primitives` 及一切 `@deepseek-ai/dsh-client-ui-*` **不是 npm 依赖**：宿主把「自己那版」编译产物经 client 模块表（boot manifest 组合，0.2.x 由 `dsh.client.inject`/`external` 声明图边 + shell 静态表）供给插件 bundle 的裸 `require`。因此 **npm 侧无法表达「primitives API ≥ X」**——兼容策略 = `engines.dsh` 下限（`>=0.2.1-alpha.2`）+ 只消费**稳定子集** + 升级宿主后重跑浏览器走查（视觉行为 npm 测试覆盖不到）。
+- **稳定子集**（0.2.1-alpha.2 实证）：`Button` / `Switch`（label 必填）/ `Pill` / `Tag` / `StateDot` / `Menu`（open/anchor/items/selectedId/onSelect/onClose/align/portal）/ `Modal`（closeLabel 必填）+ `IconChevronDownOutlineMedium`（0.2.x 图标改名：`*Outline14/16` → `*OutlineMedium/Regular` 双描边）。0.2.x 新增件（SettingsForm 族、SegmentedControl、Checkbox 等）**不引入**——本插件自绘表单；若未来出现破坏性漂移，在 `client/menu-select.tsx` 这类包装组件内做能力探测收敛，不在业务代码散落 try/catch。
+- 类型：devDependency 装 `@deepseek-ai/dsh-client-ui-primitives`（**精确锁版**，与 `engines.dsh` 下限对应的宿主版本——npm 线与 dsh 同班次发布；升级 dsh 开发依赖时**同步锁步升级本包与 `@deepseek-ai/schemastery`**——插件导出的 Config 带有 `.volatile()` 元数据，schemastery peer 必须解析到宿主同班次的 3.18.5-alpha.x，3.18.2 没有该方法会在加载时崩）。运行时真源仍是宿主模块表供给的那版，npm 包只供类型；**禁止把 `deepseek-harness/` 源码 import 进产物或 tsconfig**。`tsdown.config.ts` 的 `CLIENT_EXTERNALS` 与 build-shape 测试的 require 白名单都要含该包名。
 - 下拉一律走 `client/menu-select.tsx` 的 `MenuSelect`（LanguageRow 同款：锚点按钮 + 当前值 + chevron + `Menu` portal）。已知语义：菜单开着按 Escape，菜单关闭的同时**宿主设置面板也会关**（面板自身在 document 层监听 Escape，官方 LanguageRow 同款行为，非本插件缺陷）。
 
 ## 5. 中转站协议事实（new-api 家族）
@@ -141,7 +154,7 @@ DSH_HOME="$PWD/.dsh-home" node_modules/.bin/dsh plugin --profile web add "$PWD"
 
 - `npm test`（vitest）：pricing/relay（mock 面板三种方言+vendors）、catalog（name=id、合并保留）、route-config（能力合并/删除/修订守卫重试/同步保留/maxTokens 回落/unsetRoute/分组覆盖视图）、capabilities（models.dev 三态映射、limit.output、缓存单飞、refresh 绕缓存/失败抛错/单飞）、knowledge（**L0-L5 层级矩阵**：casefold/版本分隔/变体补全唯一性/别名/歧义放弃/strip 回归；maxTokens 校验；分组 overrides 归一；**预置增量层**：normalizePresetDelta/resolvePreset/diffPreset/summarize 矩阵）、knowledge-preset（fixture：主流白名单/365 天窗口/非对话双信号/渠道去重 drop+rekey/首方日期权威/OpenRouter 注入与降级/slug 映射）、capability-ops（定向 ops 路径形状、覆盖带 panel 寻址、删除真实生效、空组清理、重放一次写、坏条目整批拒绝）、panels-ops（CRUD/id 校验与唯一/keyRef 生成去重/删除清理落盘/凭据 unset 告警）、refresh（刷新写 delta 落盘+逐面板重放/单面板失败不回滚 delta/取数失败先于写抛错/恢复基线 unset+重放）、account（5s TTL 缓存命中/失败缓存/按面板隔离/TTL 过期恢复）、panels（panelSummaries 纯配置态含 overrideCount/defaultModelTarget 且无 account 字段）、connection-test（四类分类矩阵 + mock 面板 401 两形态 + 死端口）、dashboard-chart（刻度/抽稀/堆叠几何/linePath-linePoints/Top-N 合并稳定排序纯函数）、capability-draft（entryFromDraft/parseContextWindow 矩阵，K=1024，maxTokens 上限 1,048,576）、build-shape（**vm 沙箱真实加载 client 产物**：捕获 `__ModuleLoader__.load` 定义、调 factory 断言 apply/inject 导出面与 require 白名单——minify 会改写字符串形态，勿用 grep 断言；宿主 ESM externals；**client 体积 ≤350KB 断言**；嵌套 secret schema 断言；**交付物历史专名哨兵零命中审计（哨兵明文见 tests/build-shape.test.ts）**）、dev-home。**走查/截图工具入库**：`tests/walkthrough/cdp.mjs`（零依赖 CDP 驱动：eval/click 带元素命中校验/DOM-click 兜底/截图，库 + CLI）与 `shot.mjs`；不进 npm pack。**插件设置语言切换**：`locale.preference` 服务端持久化。
 - **隔离 home 的正确做法**：`mkdir` 新目录后 `DSH_HOME=<新目录> node_modules/.bin/dsh plugin --profile web add "$PWD"` 从零安装。**不要 `cp -R` 复制现成 home**（profile bundle 解析会断）。
-- 浏览器验收：隔离实例（`node scripts/dev.js --dsh-home <临时目录> --port 3198 --no-open`）+ mock 面板（`node .tmp/run-mock.mjs <port>`，`tests/mock-relay.ts` 支持固定端口；多面板起两个 mock 实例）+ browser-use / web-gui-tester 技能（**v0.6.1 IAB 排查结论：0.6.0 的「输入管线失效」不复现**——locator 点击、cua 坐标、DOM click 均能送达 dsh 对话框，当时的失败是 Modal 遮罩遮挡与临时宿主缺陷；CDP 直驱（`tests/walkthrough/cdp.mjs`，入库工具）仍用于截图与脚本化走查；IAB `fill('')` 空串不落 DOM 是工具层怪癖，清空输入用原生 setter + input 事件）。走查清单：主页两 tab（连接/模型能力）渲染；面板手风琴（折叠行直达删除 / 展开唯一性 / 新增卡 create-only 无编辑）+ 双面板同时生效（两条路由落盘）+ 删除清理（路由/覆盖组/凭据引用）落盘断言 + 删除 Modal 两行警告（覆盖条数 / 默认模型指向）；四 tab 就地折叠回归；账户行懒填充（不可达面板不阻塞列表）；keys 行↔卡（一次一张卡、应用即写、失败不收卡、Modal 删除、启用 Switch）；Use 后 active 标签即时出现（竞态回归）；禁用 key 警告；模型表三计价；看板四卡一行（getBoundingClientRect 断言同行）+ 7/14/30 切换 + 指标三态（金额/Token/双轴：右轴刻度+折线+图例条目）+ Top-N「其他」合并（9 模型 mock；「其他」图例不可点）+ SVG 图几何断言（文字/折线均在 SVG 界内）；日志两行筛选不叠压 + 三个下拉占位文案 + MenuSelect 开/选/关；能力页：预置折叠区可搜（~140 条）+ 增量状态行（编译基线 N 条 · 已刷新 +x/−y）+ 恢复基线（Modal→unset 落盘→重放）+ **重启后增量仍在**（dsh 进程重启验证）、平台卡按面板分组 + **覆盖率分段可点过滤**（切/换/清三态）、匹配徽标（mock 含小写 id / `x.1` 式 id / 缺 preview id / k3 别名）、maxTokens 编辑与落盘断言（settings.yaml 精确断言，含清除回落）、完成即存、刷新预置（含重放消息）、无全局保存按钮；连接测试四态（正常/坏 token/坏 userId/死端口）；**中英两种界面语言各走查一遍**（语言偏好服务端持久化于 `locale.preference`，headless Chrome 按 navigator.language 初判——无存储偏好时插件区可能在壳采纳语言前短暂显示另一语言，截图前先在菜单里点一次目标语言）。**RPC envelope 定案（v0.6.1）**：`POST /api/settings/describe` body = `{type:'client-request', rpcId, method:'settings/describe', payload:{args:{}}}`（payload 必须恰好一个 plain-object `args` 字段；`packages/api/gateway/src/index.ts` remoteRequest + `packages/client/connection/src/rpc-schema.ts`）；走查用它直接断言 relay 视图零令牌明文 + `secrets` sidecar 含 `panels.<id>.accessToken`。**注意事项更新：locator 点击可能因 Modal 遮罩（aria-hidden mask）actionability 超时——先关弹窗再点；点击可能被吞，要点后验证状态再重试。** 更多实测坑：**scrollIntoView 平滑滚动会让测量
+- 浏览器验收：隔离实例（`node scripts/dev.js --dsh-home <临时目录> --port 3198 --no-open`）+ mock 面板（`node .tmp/run-mock.mjs <port>`，`tests/mock-relay.ts` 支持固定端口；多面板起两个 mock 实例）+ **ZCode 自带 browser-use 技能（v0.7.0 起首选**：IAB 后端 locator/snapshot/截图全链路可用，语言切换走 `settings/mutate` RPC 写 `locale.preference` 后 reload；`tests/walkthrough/cdp.mjs` 退为脚本化批量断言的备用工具）（**v0.6.1 IAB 排查结论：0.6.0 的「输入管线失效」不复现**——locator 点击、cua 坐标、DOM click 均能送达 dsh 对话框，当时的失败是 Modal 遮罩遮挡与临时宿主缺陷；CDP 直驱（`tests/walkthrough/cdp.mjs`，入库工具）仍用于截图与脚本化走查；IAB `fill('')` 空串不落 DOM 是工具层怪癖，清空输入用原生 setter + input 事件）。走查清单：主页两 tab（连接/模型能力）渲染；面板手风琴（折叠行 = 圆点 + 名称 + 元信息 + chevron，**无按钮**——删除只在展开后的体部头（测试连接旁），折叠行头曾有过直达删除、v0.7.0 应操作者要求移除（与展开态重复）/ 展开唯一性 / 新增卡 create-only 无编辑）+ 双面板同时生效（两条路由落盘）+ 删除清理（路由/覆盖组/凭据引用）落盘断言 + 删除 Modal 两行警告（覆盖条数 / 默认模型指向）；**0.2.x 走查入口：侧栏「插件」→ relay 卡片（summary 单行）→ 详情页两 tab**；四 tab 就地折叠回归；账户行懒填充（不可达面板不阻塞列表）；keys 行↔卡（一次一张卡、应用即写、失败不收卡、Modal 删除、启用 Switch）；Use 后 active 标签即时出现（竞态回归）；禁用 key 警告；模型表三计价；看板四卡一行（getBoundingClientRect 断言同行）+ 7/14/30 切换 + 指标三态（金额/Token/双轴：右轴刻度+折线+图例条目）+ Top-N「其他」合并（9 模型 mock；「其他」图例不可点）+ SVG 图几何断言（文字/折线均在 SVG 界内）；日志两行筛选不叠压 + 三个下拉占位文案 + MenuSelect 开/选/关；能力页：预置折叠区可搜（~140 条）+ 增量状态行（编译基线 N 条 · 已刷新 +x/−y）+ 恢复基线（Modal→unset 落盘→重放）+ **重启后增量仍在**（dsh 进程重启验证）、平台卡按面板分组 + **覆盖率分段可点过滤**（切/换/清三态）、匹配徽标（mock 含小写 id / `x.1` 式 id / 缺 preview id / k3 别名）、maxTokens 编辑与落盘断言（`profiles/web/cordis.patch.yml` 精确断言，含清除回落）、完成即存、刷新预置（含重放消息）、无全局保存按钮；连接测试四态（正常/坏 token/坏 userId/死端口）；**中英两种界面语言各走查一遍**（语言偏好服务端持久化于 `locale.preference`，headless Chrome 按 navigator.language 初判——无存储偏好时插件区可能在壳采纳语言前短暂显示另一语言，截图前先在菜单里点一次目标语言）。**RPC envelope 定案（v0.6.1，0.2.x 实测不变）**：`POST /api/settings/describe` body = `{type:'client-request', rpcId(字符串), method:'settings/describe', payload:{args:{}}}`（payload 必须恰好一个 plain-object `args` 字段）；**响应 result.value = `{writable, hasDocument, namespaces:[{ns,revision,value,user,secrets?,autoGenerate,applies}]}`**（0.2.x 新形状）；走查用它直接断言 relay 视图零令牌明文 + `secrets` sidecar 含 `panels.<id>.accessToken`。语言切换可直接走 `settings/mutate` RPC：`payload:{args:{ns:'locale', ops:[{op:'set', path:['preference'], value:'en'}]}}` 后 reload。**注意事项更新：locator 点击可能因 Modal 遮罩（aria-hidden mask）actionability 超时——先关弹窗再点；点击可能被吞，要点后验证状态再重试。** 更多实测坑：**scrollIntoView 平滑滚动会让测量
   坐标过期**——用 `behavior:'instant'` 滚动、沉降后复测并对 `elementFromPoint` 校验命中再点；
   **`<details>` 折叠内容与对话框裁剪会让元素不可命中**（有布局但 elementFromPoint 不中），
   需逐候选评分后再点；管道命令记得 `set -o pipefail`（否则脚本失败被 tee 吞掉）。
@@ -159,6 +172,7 @@ DSH_HOME="$PWD/.dsh-home" node_modules/.bin/dsh plugin --profile web add "$PWD"
 
 ## 8. 版本史（细节见 docs/WORKLOG.md）
 
+- **v0.7.0（当前）**：**宿主升级 dsh ≥0.2.1-alpha.2（不兼容旧宿主线）**。0.2.x 的配置模型重构：插件状态从 `relay` settings namespace 迁到 composition **entry config**（用户层 = profile patch 文档 `profiles/<name>/cordis.patch.yml`；旧 settings.yaml 由宿主自动导入）；Config 四个顶层字段全部 `.volatile()`（写热提交、不重启 fiber；`apply` 收 volatile cells，`loader/volatile-update` 取代 installSection 的 onChange）；`installSection`/`get`/`section` 移除——`src/store.ts` 的 `PluginStore` 重建旧门面（own ns 走 cell，`llm-pi-ai`/`agent-default-model` 走 describe 视图 + `settings/document-updated` 失效缓存）；**配置页从 `settings.section` slot 迁到 Plugins 面板的 `plugins.item` slot**（`configForms.whileServed(['relay'])` 守护 + `view: 'summary'|'page'` 双渲染；`settings.configure({auto:false})` 关宿主自动页）；primitives 图标改名 `IconChevronDownOutline14→Medium`（Button/Switch/Menu/Modal 子集不变）；schemastery peer 锁 `~3.18.5-alpha.1`（`.volatile()` 必须与宿主同班次）；`dsh.client.inject` 增加 plugin-manager。实测（隔离 home，0.2.1-alpha.2）：面板 CRUD、/use（凭据+pi-ai 路由+能力推导）、模型同步、能力 ops（覆盖增删+空组清理）、连接测试、看板/日志、刷新预置（落盘 delta + 全面板重放）、删除清理、重启后 delta 保留、describe 脱敏 sidecar 全部通过；浏览器走查中英 17/17；profile patch 写出的 `reasoningEfforts.off: null` 完好（js-yaml 写入，无 v0.6.1 PyYAML 问题）。
 - **v0.1.0**：初版（CLI + bundle 基础版，vendor 专名命名）。
 - **v0.2.0**：连接信息全部进 Web 设置页；同类中转站通用。
 - **v0.2.1**：修 `npm start` 误用外部 dsh home（home 解析锚定仓库）。

@@ -10,7 +10,7 @@
 import { CSS_PREFIX } from '../constants.js'
 
 export const cssText = `
-.${CSS_PREFIX}_section{max-width:760px;color:var(--dsw-alias-label-primary);flex-direction:column;gap:12px;display:flex}
+.${CSS_PREFIX}_section{color:var(--dsw-alias-label-primary);flex-direction:column;gap:12px;display:flex}
 .${CSS_PREFIX}_title{color:var(--dsw-alias-label-primary);margin:0;font-size:16px;font-weight:500;line-height:24px}
 .${CSS_PREFIX}_intro{color:var(--dsw-alias-label-tertiary);margin:0;font-size:14px;line-height:22px}
 .${CSS_PREFIX}_card{background:var(--dsw-alias-bg-module-platform);border-radius:12px;flex-direction:column;gap:12px;padding:14px 16px;display:flex}

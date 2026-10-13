@@ -30,6 +30,8 @@ export interface SettingsScope {
 export interface SectionEnv {
   scope: SettingsScope
   t: Translator
+  /** How the Plugins panel renders this entry: one-liner or full page. */
+  view?: 'summary' | 'page'
 }
 
 type TabId = 'connection' | 'capabilities'
@@ -42,7 +44,7 @@ function errText(err: unknown): string {
 
 /** The settings section component mounted by the entry. */
 export function RelaySection(props: SectionEnv): JSX.Element {
-  const { scope, t } = props
+  const { scope, t, view = 'page' } = props
   const snapshot = useSyncExternalStore((fn) => scope.subscribe(fn), () => scope.getSnapshot())
 
   const [tab, setTab] = useState<TabId>('connection')
@@ -87,6 +89,12 @@ export function RelaySection(props: SectionEnv): JSX.Element {
   }, [openPanelId, panels])
 
   const totalModels = (panels ?? []).reduce((sum, panel) => sum + panel.modelCount, 0)
+
+  // The Plugins panel renders the registration twice: a one-liner on the card
+  // and in the detail header, then the full page under it.
+  if (view === 'summary') {
+    return <span className="relay_summary">{panels !== null ? t('panelsStatusLine')(panels.length, totalModels) : t('intro')}</span>
+  }
 
   const tabs: Array<{ id: TabId, label: string }> = [
     { id: 'connection', label: t('tabConnection') },

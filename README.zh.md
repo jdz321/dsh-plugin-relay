@@ -2,7 +2,7 @@
 
 # dsh-plugin-relay
 
-把 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（`dsh`，下称 dsh）接入任意 **new-api 系中转站面板**（one-api / new-api / Veloera / done-hub 等）的 dsh 插件。全部功能都在 dsh web 设置页——没有 CLI，不需要手工编辑配置文件，也不预置任何面板专属默认值。v0.6.0 起**支持同时接入多套面板**——每套是 dsh 里的一个独立模型提供方，在模型选择器中并列可选。
+把 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（`dsh`，下称 dsh）接入任意 **new-api 系中转站面板**（one-api / new-api / Veloera / done-hub 等）的 dsh 插件。全部功能都在 dsh 的 **「插件」面板**——没有 CLI，不需要手工编辑配置文件，也不预置任何面板专属默认值。v0.6.0 起**支持同时接入多套面板**——每套是 dsh 里的一个独立模型提供方，在模型选择器中并列可选。
 
 ![API Keys](assets/screenshot-keys.zh.png)
 
@@ -27,7 +27,7 @@
 
 ## 安装
 
-要求 Node ≥ 20，pnpm 在 PATH 上（dsh 的插件安装走 pnpm）。
+要求 dsh ≥ **0.2.1-alpha.2**、Node ≥ 20，pnpm 在 PATH 上（dsh 的插件安装走 pnpm）。
 
 ```sh
 # 从 npm 安装（发布后）
@@ -38,11 +38,11 @@ npm install && npm run build
 dsh plugin --profile web add /path/to/dsh-plugin-relay
 ```
 
-如需在 headless 会话使用，按同样方式装进 headless profile（`--profile headless`）。然后重启 `dsh web`，打开 **设置 → 中转站**。
+如需在 headless 会话使用，按同样方式装进 headless profile（`--profile headless`）。然后重启 `dsh web`，打开侧栏 **「插件」面板 → 中转站**。
 
 ## 使用
 
-1. 打开 **设置 → 中转站 → 连接**，点「新增中转站」：填写名称（字母 / 数字 / `_` / `-`，≤32 字符——它同时是模型提供方的名字）、面板首页地址（不带 `/v1` 后缀）、面板「个人中心」的访问令牌与用户 ID。*测试连接* 可在配置 key 前先验证三项配置。
+1. 打开 **「插件」面板 → 中转站 → 连接**，点「新增中转站」：填写名称（字母 / 数字 / `_` / `-`，≤32 字符——它同时是模型提供方的名字）、面板首页地址（不带 `/v1` 后缀）、面板「个人中心」的访问令牌与用户 ID。*测试连接* 可在配置 key 前先验证三项配置。
 2. 点击面板行进入详情页。在「API Keys」页新建 key（或对既有 key 点「使用」）：插件把 key 写入 dsh 凭据存储、建立该面板的模型路由并同步模型目录。需要几套就接几套——它们同时生效。
 3. 在「模型」页查看每个模型的价格；刷新列表会让 dsh 的路由目录始终与 key 的实际可调用集合一致。
 4. 「数据看板」「使用日志」随时查看余额与消耗；两者只读面板的报表接口。
@@ -64,8 +64,8 @@ dsh plugin --profile web add /path/to/dsh-plugin-relay
 
 ## 兼容性
 
-- 要求 dsh ≥ **0.1.5-rc.2**（`engines.dsh` 强制）——这是首个在冻结浏览器模块表中携带 `@deepseek-ai/dsh-client-ui-primitives` 的宿主；本插件 UI 运行时消费该包（宿主供给自己编译的版本，插件不以它为运行时依赖——仅作为**精确锁版到宿主对应版本**的 devDependency 提供类型；npm 的 `latest` 标签虽停在早期 rc，但同版本构建一直在随 dsh 锁步发布）。
-- 浏览器验收覆盖 dsh **0.1.5-rc.2** 与 **0.1.5-rc.3**（当前 npm 线）。本插件消费的 primitives 子集（Button / Switch / Pill / Tag / StateDot / Menu / Modal）经 diff 实证到 **0.1.7-rc.1** git tag 仍向后兼容。
+- 要求 dsh ≥ **0.2.1-alpha.2**（`engines.dsh` 强制）——0.2.x 起插件配置页宿主为「插件」面板（`plugins.item` slot）、插件状态落在 entry config（profile patch），本插件不兼容 0.1.x 宿主线。`@deepseek-ai/dsh-client-ui-primitives` 由宿主供给自己编译的版本，插件不以它为运行时依赖——仅作为**精确锁版到宿主对应版本**的 devDependency 提供类型（与 `@deepseek-ai/schemastery` 一同随 dsh 锁步升级）。
+- 浏览器验收覆盖 dsh **0.2.1-alpha.2**（隔离 home 实装 + headless 走查，中英双语各一遍）。本插件消费的 primitives 子集（Button / Switch / Pill / Tag / StateDot / Menu / Modal + `IconChevronDownOutlineMedium`）与该宿主版本逐一对证。
 - 插件有意只消费该稳定子集，并在每次升级 dsh 开发依赖后重跑一轮浏览器走查（见 docs/PUBLISHING.md）。
 
 ## 已知限制

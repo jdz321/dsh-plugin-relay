@@ -48,7 +48,8 @@ import { createPanel, deletePanel, PanelRequestError } from './panels-ops.js'
 import { groupRatioOf, priceEntry } from './pricing.js'
 import { refreshPresetAndReplay, restorePresetBaseline } from './refresh.js'
 import { ensureRouteProfile, storedRouteProfile, syncRouteCatalog } from './route-config.js'
-import type { CredentialsService, HostContext, SchemaType, SettingsService } from './types.js'
+import { DEFAULT_MODEL_NS, PI_AI_NS, PluginStore } from './store.js'
+import type { CredentialsService, HostContext, HostSettingsService, RelayConfigCells, SchemaType } from './types.js'
 import { aggregateDailyBuckets, buildDashboardView, normalizeLog, startOfDaysAgo, startOfToday } from './usage.js'
 
 /** Stable Cordis plugin name. */
@@ -86,30 +87,31 @@ const PanelSchema = Schema.object({
   selectedKeyName: Schema.string(),
 })
 
-/** Composition schema; resolved values are the settings `base` layer. */
-export interface PluginConfig {
-  panels: Record<string, unknown>
-  capabilityCatalog: Record<string, unknown>
-  capabilityOverrides: Record<string, Record<string, unknown>>
-  capabilityPresetDelta?: Record<string, unknown>
-}
-
+/**
+ * The plugin's Config schema — since dsh ≥0.2.1 this IS the settings page
+ * schema: the entry's persisted state lives in the composition entry's
+ * profile patch, and every top-level field is declared `.volatile()` so the
+ * plugin's own runtime writes (panel CRUD, capability saves, preset
+ * refreshes) hot-reload into the running fiber instead of restarting it. The
+ * resolved config arrives in `apply` as live cells; the schema envelope the
+ * settings page sees is derived from this same schema, with `role('secret')`
+ * fields redacted on the wire.
+ */
 const configShape = {
-  panels: Schema.dict(PanelSchema),
-  capabilityCatalog: Schema.dict(CapabilityEntrySchema),
-  capabilityOverrides: Schema.dict(Schema.dict(CapabilityEntrySchema)),
-  capabilityPresetDelta: PresetDeltaSchema,
+  panels: Schema.dict(PanelSchema).volatile(),
+  capabilityCatalog: Schema.dict(CapabilityEntrySchema).volatile(),
+  capabilityOverrides: Schema.dict(Schema.dict(CapabilityEntrySchema)).volatile(),
+  capabilityPresetDelta: PresetDeltaSchema.volatile(),
 }
 
-export const Config: SchemaType<PluginConfig> = Schema.object(configShape) as SchemaType<PluginConfig>
-
-/** The user-editable settings section schema served to the web settings page. */
-const SectionSchema = Schema.object(configShape)
+export const Config = Schema.object(configShape) as unknown as SchemaType<Record<string, unknown>>
 
 /** Service references captured from the composition (null when absent). */
-let settingsService: SettingsService | null = null
+let settingsService: HostSettingsService | null = null
 let credentialsService: CredentialsService | null = null
 let hostLogger: HostContext['logger'] | null = null
+/** The store facade over the host service + volatile cells (null until wired). */
+let store: PluginStore | null = null
 
 /** Diagnostic: last settings-registration failure, surfaced via /state. */
 let settingsRegistrationError: string | null = null
@@ -121,13 +123,9 @@ function errorText(err: unknown): string {
   return err instanceof Error ? (err.stack ?? err.message) : String(err)
 }
 
-function safeGet(ns: string): unknown {
-  try {
-    return settingsService?.get(ns)
-  } catch (err) {
-    settingsReadError = err instanceof Error ? err.message : String(err)
-    return undefined
-  }
+/** Stored panels, read from the volatile config cell. */
+function currentPanels(): PanelConfig[] {
+  return panelsOf(store?.get(NAMESPACE))
 }
 
 /** Resolve the API key credential dsh currently routes with (null if none). */
@@ -139,11 +137,6 @@ async function activeCredential(keyRef: string): Promise<string | null> {
   } catch {
     return null
   }
-}
-
-/** Stored panels, read through the safe getter. */
-function currentPanels(): PanelConfig[] {
-  return panelsOf(safeGet(NAMESPACE))
 }
 
 /** One stored panel by id, or null. */
@@ -170,20 +163,17 @@ function resolvePanel(explicit: unknown): PanelConfig {
 
 /** The plugin-owned capability config (knowledge base + per-panel overrides). */
 function currentKnowledge(): KnowledgeConfig {
-  return normalizeKnowledgeConfig(safeGet(NAMESPACE))
+  return normalizeKnowledgeConfig(store?.get(NAMESPACE))
 }
 
 /**
- * The preset delta persisted by the last 「刷新预置」 (v0.6.1). Read through the
- * raw section — the resolved view materializes the schemastery `{}` shell,
- * which normalizePresetDelta rejects as absent.
+ * The preset delta persisted by the last 「刷新预置」 (v0.6.1). Read from the
+ * volatile cell — its value is absent (undefined) until the first refresh
+ * persists one, which normalizePresetDelta reports as absent.
  */
 function storedPresetDelta() {
-  const raw = safeGet(NAMESPACE)
-  const delta = (raw && typeof raw === 'object' && !Array.isArray(raw))
-    ? (raw as Record<string, unknown>).capabilityPresetDelta
-    : undefined
-  return normalizePresetDelta(delta)
+  const raw = store?.get(NAMESPACE) as Record<string, unknown> | undefined
+  return normalizePresetDelta(raw?.capabilityPresetDelta)
 }
 
 /** The effective preset layer: compiled baseline + the persisted delta. */
@@ -236,7 +226,7 @@ function buildState() {
   return {
     clientModuleId: CLIENT_MODULE_ID,
     panelCount: currentPanels().length,
-    namespaceRegistered: safeGet(NAMESPACE) !== undefined,
+    namespaceRegistered: store !== null,
     settingsRegistrationError,
     settingsReadError,
   }
@@ -251,12 +241,12 @@ const accountCache = new AccountCache()
 /** Debounced route-profile mirror after connection edits (every panel). */
 let mirrorTimer: ReturnType<typeof setTimeout> | null = null
 function scheduleRouteMirror(): void {
-  if (!settingsService) return
+  if (!store) return
   if (mirrorTimer) clearTimeout(mirrorTimer)
   mirrorTimer = setTimeout(() => {
     mirrorTimer = null
     for (const panel of currentPanels()) {
-      ensureRouteProfile(settingsService!, panel).catch((err) => {
+      ensureRouteProfile(store!, panel).catch((err) => {
         hostLogger?.warn(`relay: route profile mirror failed for ${panel.id}`, err)
       })
     }
@@ -306,7 +296,7 @@ async function keysResponse(panel: PanelConfig): Promise<Response> {
 
 /** Apply a planned switch: credential write, route sync (with capability replay), metadata. */
 async function performSwitch(panel: PanelConfig, idOrName: string, noModels: boolean): Promise<{ plan: SwitchPlan, warnings: string[] }> {
-  if (!settingsService || !credentialsService) throw new Error('services unavailable')
+  if (!store || !credentialsService) throw new Error('services unavailable')
   const relay = relayFromPanel(panel)
   const plan = await planSwitch({ relay, idOrName, noModels })
   const warnings: string[] = []
@@ -318,19 +308,19 @@ async function performSwitch(panel: PanelConfig, idOrName: string, noModels: boo
   // the capability fields derived from the knowledge base / overrides.
   if (plan.ids) {
     try {
-      await syncRouteCatalog(settingsService, panel, plan.ids, knowledgeForPanel(resolvedKnowledge(), panel.id))
+      await syncRouteCatalog(store, panel, plan.ids, knowledgeForPanel(resolvedKnowledge(), panel.id))
     } catch (err) {
       warnings.push(`模型列表写入被 llm-pi-ai 设置校验拒绝: ${err instanceof Error ? err.message : String(err)}`)
     }
   } else {
     try {
-      await ensureRouteProfile(settingsService, panel)
+      await ensureRouteProfile(store, panel)
     } catch {
       /* connection mirror is cosmetic */
     }
   }
   try {
-    await settingsService.update(NAMESPACE, { panels: { [panel.id]: { selectedKeyName: plan.token.name } } })
+    await store.update(NAMESPACE, { panels: { [panel.id]: { selectedKeyName: plan.token.name } } })
   } catch {
     /* cosmetic only */
   }
@@ -349,7 +339,7 @@ function route(connection: { registerFetchRoute(owner: HostContext, spec: Record
 
 /** Build the per-model capability view for one panel's route. */
 function capabilityModelsView(panel: PanelConfig) {
-  const profile = storedRouteProfile(settingsService!, panel.id)
+  const profile = storedRouteProfile(store!, panel.id)
   const entries = Array.isArray(profile?.models) ? profile!.models ?? [] : []
   const knowledge = knowledgeForPanel(resolvedKnowledge(), panel.id)
   return entries.map((entry) => {
@@ -371,7 +361,7 @@ function capabilityModelsView(panel: PanelConfig) {
 function capabilitiesView() {
   const knowledge = currentKnowledge()
   const panels = currentPanels().map((panel) => {
-    const profile = storedRouteProfile(settingsService!, panel.id)
+    const profile = storedRouteProfile(store!, panel.id)
     return {
       id: panel.id,
       configured: Boolean(profile),
@@ -396,51 +386,64 @@ function capabilitiesView() {
 /** Per-panel list summaries for the connection tab — pure config state, no I/O. */
 function panelsResponse(): Response {
   const summaries = panelSummaries({
-    relay: safeGet(NAMESPACE),
-    piAi: safeGet('llm-pi-ai'),
-    defaultModel: safeGet('agent-default-model'),
+    relay: store?.get(NAMESPACE),
+    piAi: store?.get(PI_AI_NS),
+    defaultModel: store?.get(DEFAULT_MODEL_NS),
     routeModelsCount: storedRouteModelsCount,
   })
   return json({ ok: true, panels: summaries })
 }
 
 function storedRouteModelsCount(route: string): number {
-  const profile = settingsService ? storedRouteProfile(settingsService, route) : undefined
+  const profile = store ? storedRouteProfile(store, route) : undefined
   return Array.isArray(profile?.models) ? profile!.models!.length : 0
 }
 
 /** Panel create/delete share one body shape and error mapping (v0.6.1: edit is gone). */
 async function handlePanelsMutation(request: Request, action: 'create' | 'delete'): Promise<Response> {
-  if (!settingsService) return json({ ok: false, error: 'settings service unavailable' }, 500)
+  if (!store) return json({ ok: false, error: 'settings service unavailable' }, 500)
   const body = await readJson(request)
   if (action === 'create') {
-    const panel = await createPanel(settingsService, body)
+    const panel = await createPanel(store, body)
     hostLogger?.info(`relay: panel ${panel.id} created`)
     return json({ ok: true, panel: { id: panel.id, keyRef: panel.keyRef } })
   }
   const id = typeof body.panel === 'string' ? body.panel.trim() : ''
-  const result = await deletePanel(settingsService, credentialsService, id)
+  const result = await deletePanel(store, credentialsService, id)
   hostLogger?.info(`relay: panel ${id} deleted (route removed: ${result.routeRemoved})`)
   return json({ ok: true, ...result })
 }
 
 /**
- * Mount the settings namespace and, when the composition serves a browser,
- * the /api/relay/* routes. Both registrations die with this plugin's fiber,
+ * Wire the plugin to the composition: read the entry's volatile config cells,
+ * disable the host's auto-generated settings page in favor of the client's
+ * own, serve the /api/relay/* routes, and keep the route profiles mirrored
+ * after hot config changes. Every registration dies with this plugin's fiber,
  * so removing the bundle row unmounts everything.
  */
-export function apply(ctx: HostContext, config: Partial<PluginConfig> | undefined): void {
-  const base = Config(config ?? {}) as unknown as Record<string, unknown>
+export function apply(ctx: HostContext, config: unknown): void {
   hostLogger = ctx.logger
+  // The resolved entry config: volatile fields arrive as live cells that the
+  // loader updates in place on every hot (no-reload) write.
+  const cells = config as RelayConfigCells
   ctx.inject(['settings', 'credentials'], (services) => {
-    const captured = services as unknown as { settings: SettingsService, credentials: CredentialsService }
+    const captured = services as unknown as { settings: HostSettingsService, credentials: CredentialsService }
     settingsService = captured.settings
     credentialsService = captured.credentials
     try {
-      settingsService.installSection(ctx, NAMESPACE, SectionSchema, base, {
-        setSource: () => {},
-        onChange: scheduleRouteMirror,
-      })
+      // The client draws the relay page itself (plugins.item slot); without
+      // this the host would also generate a generic config form for the entry.
+      ctx.effect(() => settingsService!.configure({ auto: false }, ctx.fiber))
+      const entryId = ctx.fiber?.entry?.options?.id?.trim() || NAMESPACE
+      store = new PluginStore(settingsService!, cells, entryId)
+      // Foreign entry reads (llm-pi-ai, agent-default-model) cache until the
+      // host reports the entry's document changed (every reconciled write).
+      ctx.on('settings/document-updated', ((ns: unknown) => {
+        store?.invalidateForeign(String(ns))
+      }) as never)
+      // Hot config changes (panel CRUD, capability saves, preset refreshes,
+      // page edits) — mirror the pi-ai route profiles afterward.
+      ctx.on('loader/volatile-update', (() => scheduleRouteMirror()) as never)
     } catch (err) {
       settingsRegistrationError = errorText(err)
     }
@@ -527,7 +530,7 @@ export function apply(ctx: HostContext, config: Partial<PluginConfig> | undefine
       const panel = resolvePanel(new URL(request.url).searchParams.get('panel'))
       const missing = missingPanelSetup(panel)
       if (missing) return json({ ok: false, error: `missing:${missing}`, models: [] }, 400)
-      if (!settingsService) return json({ ok: false, error: 'settings service unavailable' }, 500)
+      if (!store) return json({ ok: false, error: 'settings service unavailable' }, 500)
       const credentialValue = await activeCredential(panel.keyRef)
       if (!credentialValue) return json({ ok: false, error: 'no-active-key', models: [] }, 400)
       const relay = relayFromPanel(panel)
@@ -552,7 +555,7 @@ export function apply(ctx: HostContext, config: Partial<PluginConfig> | undefine
       }))
       let catalogWarning: string | undefined
       try {
-        await syncRouteCatalog(settingsService, panel, ids, knowledgeForPanel(resolvedKnowledge(), panel.id))
+        await syncRouteCatalog(store, panel, ids, knowledgeForPanel(resolvedKnowledge(), panel.id))
       } catch (err) {
         catalogWarning = err instanceof Error ? err.message : String(err)
       }
@@ -574,11 +577,11 @@ export function apply(ctx: HostContext, config: Partial<PluginConfig> | undefine
     // name/id, overrides addressed to their panel) and replays the
     // derivation over every configured route in one guarded write each.
     route(connection, ctx, 'capabilities', ['GET', 'POST'], async (request) => {
-      if (!settingsService) return json({ ok: false, error: 'settings service unavailable' }, 500)
+      if (!store) return json({ ok: false, error: 'settings service unavailable' }, 500)
       if (request.method === 'GET') return json(capabilitiesView())
       const body = await readJson(request)
       try {
-        await applyCapabilityOps(settingsService, body as Record<string, unknown>, resolvedKnowledge, currentPanels())
+        await applyCapabilityOps(store, body as Record<string, unknown>, resolvedKnowledge, currentPanels())
         return json(capabilitiesView())
       } catch (err) {
         return json({ ok: false, error: err instanceof Error ? err.message : String(err) }, 400)
@@ -592,12 +595,12 @@ export function apply(ctx: HostContext, config: Partial<PluginConfig> | undefine
     // restarts; 恢复基线 is the way back), and replay the derivation over
     // every configured panel route.
     route(connection, ctx, 'knowledge-refresh', ['POST'], async () => {
-      if (!settingsService) return json({ ok: false, error: 'settings service unavailable' }, 500)
+      if (!store) return json({ ok: false, error: 'settings service unavailable' }, 500)
       let result
       try {
         result = await refreshPresetAndReplay({
           fetchDoc: () => modelsDev.refresh(),
-          settings: settingsService,
+          settings: store,
           panels: currentPanels(),
           baseline: KNOWLEDGE_PRESET,
           knowledge: resolvedKnowledge,
@@ -612,9 +615,9 @@ export function apply(ctx: HostContext, config: Partial<PluginConfig> | undefine
     // 恢复基线: drop the persisted preset delta (back to the compiled-in
     // baseline) and replay the derivation over every configured panel route.
     route(connection, ctx, 'preset-restore', ['POST'], async () => {
-      if (!settingsService) return json({ ok: false, error: 'settings service unavailable' }, 500)
+      if (!store) return json({ ok: false, error: 'settings service unavailable' }, 500)
       const result = await restorePresetBaseline({
-        settings: settingsService,
+        settings: store,
         panels: currentPanels(),
         knowledge: resolvedKnowledge,
       })

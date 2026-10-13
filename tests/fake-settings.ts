@@ -6,7 +6,7 @@
  * `describe` for the current revisions.
  */
 
-import type { SettingsDescriptor, SettingsPathOp, SettingsService } from '../src/types.js'
+import type { HostNamespaceView, SettingsPathOp, SettingsService } from '../src/types.js'
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -118,7 +118,7 @@ export class FakeSettings implements SettingsService {
     registration.revision += 1
   }
 
-  describe(): SettingsDescriptor[] {
+  describe(): HostNamespaceView[] {
     return [...this.registrations.values()].map((registration) => ({
       ns: registration.ns,
       revision: registration.revision,

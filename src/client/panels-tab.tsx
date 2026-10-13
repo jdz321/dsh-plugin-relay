@@ -15,7 +15,7 @@
  */
 
 import { useEffect, useState } from 'react'
-import { Button, IconChevronDownOutline14, Modal, StateDot, Tag } from '@deepseek-ai/dsh-client-ui-primitives'
+import { Button, IconChevronDownOutlineMedium, Modal, StateDot, Tag } from '@deepseek-ai/dsh-client-ui-primitives'
 
 import { apiPost, apiGet } from './api.js'
 import { normalizeBaseUrlDraft, setupHintFor } from './format.js'
@@ -182,7 +182,6 @@ export function PanelsTab({ t, panels, readOnly, busy, revision, refreshPanels, 
                   account={Object.hasOwn(accounts, panel.id) ? accounts[panel.id] ?? null : undefined}
                   expanded={openPanelId === panel.id}
                   readOnly={readOnly}
-                  createOpen={openCard !== null}
                   onToggle={() => setOpenPanelId(openPanelId === panel.id ? null : panel.id)}
                   onDelete={() => setDeleteTarget(panel)}
                   t={t}
@@ -226,13 +225,12 @@ function PanelItem(props: {
   account: AccountLine | null | undefined
   expanded: boolean
   readOnly: boolean
-  createOpen: boolean
   onToggle: () => void
   onDelete: () => void
   t: Translator
   onMessage: (message: { ok: boolean, text: string } | null) => void
 }): JSX.Element {
-  const { panel, account, expanded, readOnly, createOpen, onToggle, onDelete, t, onMessage } = props
+  const { panel, account, expanded, readOnly, onToggle, onDelete, t, onMessage } = props
   return (
     <div className={expanded ? 'relay_panelItem relay_panelItemOpen' : 'relay_panelItem'}>
       <div className="relay_panelRowHead">
@@ -244,12 +242,7 @@ function PanelItem(props: {
           </span>
           <span className="relay_keyMeta">{panelMetaText(panel, account, t)}</span>
         </button>
-        <IconChevronDownOutline14 className={expanded ? 'relay_panelChevron relay_panelChevronOpen' : 'relay_panelChevron'} />
-        <span className="relay_row">
-          <Button variant="outline" size="sm" disabled={readOnly || createOpen} onClick={onDelete}>
-            {t('keyDelete')}
-          </Button>
-        </span>
+        <IconChevronDownOutlineMedium className={expanded ? 'relay_panelChevron relay_panelChevronOpen' : 'relay_panelChevron'} />
       </div>
       {expanded && (
         <div className="relay_panelBody">

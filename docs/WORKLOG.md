@@ -484,3 +484,44 @@
 
 - 本轮 IAB 输入管线失效（四种输入方式都打不进 dsh 对话框），按 AGENTS §6 兜底走本机 Chrome headless + `ws` CDP 直驱：**`Runtime.evaluate` 里 DOM `.click()` / React 原生 setter 是唯一稳定路径**（Playwright locator 与 CUA 坐标都被对话框拦截）；脚本要点后验证再重试（点击会被吞）；ws 连接不关 node 不退出（每脚本 process.exit）。
 - 刷新预置实测通过（140 条 + 「并同步到模型目录」）；连接测试四态（正常/坏 token/坏 userId/死端口）文案全部按设计命中。
+
+---
+
+## 2026-10-13（v0.7.0 — 宿主升级 dsh ≥0.2.1-alpha.2）
+
+任务：升级 dsh 到 0.2.1-alpha.2 并适配（不兼容旧宿主、不做旧插件数据迁移），插件版本 0.7.0。
+
+### 1. 0.2.x 配置模型逆向（本轮核心认知）
+
+- **settings namespace 没有了**：`SettingsForms` 服务（`ctx.settings`）按 composition entry id 寻址，`installSection`/`get`/`section`/`replace 之外的一切旧面`全部移除；用户层从 `settings.yaml` 变成 **profile patch 文档**（`profiles/<name>/cordis.patch.yml`），宿主启动时把旧 settings.yaml 一次性导入并改名 `.imported`。
+- **可写性 = schema `.volatile()`**（schemastery 3.18.5-alpha.1 新原语）：`update/mutate/replace` 只允许写 volatile 字段之下的路径，否则 `Config field … is not volatile`；describe() 只投影 volatile 字段。pi-ai 的 `providers`、agent-default-model 的全部字段宿主侧已 volatile。
+- **volatile 写不重启 fiber**：`configEditor.edit` → loader 对比 raw，volatile-only 差异 → `fiber._config` 原地替换 + cell 原地 `updateVolatile` + 本 fiber `loader/volatile-update` 事件；有普通字段差异才走 fiber 重载。pi-ai 靠同一事件热重注册路由（`config.providers.get()` 是官方消费范式）。
+- **事件流**：`settings/document-updated(ns, rev)` 在根上下文 emit（无 thisArg → 全局监听可见，实测本插件 ctx.on 能收到）；`loader/volatile-update` 带 fiber 过滤的 thisArg，只有该 fiber 收到。
+- **mutate unset 语义变化**：base 层同路径有值时 unset 退化为「重置为 base」。llm-pi-ai 与 relay 的 composition base 均为空配置，unset 即真删（panels 覆盖组清理、unsetRoute 均实测真删）。
+- **RPC envelope 不变**：`{type:'client-request', rpcId(字符串), method, payload:{args}}` 依旧；`settings/describe` 无参数，响应 `result.value = {writable, hasDocument, namespaces:[…]}`，每 ns 带 `{value, user, secrets, autoGenerate, revision}`。`settings/mutate` 走 `{args:{ns, ops, expectedRevision?}}`。
+- schemastery 依旧把缺省数组/dict 具体化为 `[]`/`{}` 壳（volatile cell 内同样）——`normalizePresetDelta` 的壳检测继续有效，无需新防御。
+
+### 2. 插件侧适配
+
+- `src/index.ts`：Config 四个顶层字段 `.volatile()`；`apply(ctx, config)` 收 cells；`settings.configure({auto:false}, ctx.fiber)` 关宿主自动页；entry id 从 `ctx.fiber.entry.options.id` 读（回落 `relay`）；路由镜像改由 `loader/volatile-update` 驱动。
+- `src/store.ts`（新）：`PluginStore` 把新宿主服务包成旧 `get/section/update/mutate/describe` 门面——own ns 读 cell（免费且恒新），外部 ns 读 describe 视图按 entry 缓存、`settings/document-updated` 失效。**内部模块（route-config/capability-ops/panels-ops/refresh/plan）零改动**，tests/fake-settings 直接实现同一门面，210 个单测原样通过。
+- 客户端：页面从 `settings.section`（web 设置页）迁到 **Plugins 面板的 `plugins.item` slot**，`configForms.whileServed(['relay'], …)` 守护注册（ns 不服务时自动摘除）；组件按 `view: 'summary'|'page'` 双渲染（列表卡/详情头一行摘要 = 「N 个中转站 · 已同步 N 个模型」，page = 原两 tab UI）；状态快照从旧 `settingsScope` 换成 `configForms.get('relay')`（同一控制器被 plugin-manager 共享）。**不声明 slot 的 `locale:` 字段**——框架 t 是 `(key, params)=>string` 约束，与本插件「字典值为函数」的翻译器冲突；t 仍由 inject 传递。
+- `package.json`：dsh 与 primitives 精确锁 0.2.1-alpha.2；**schemastery peer/dev 锁 `~3.18.5-alpha.1`**（`.volatile()` 构建期方法——3.18.2 没有它，宿主若把 peer 解析到旧版会在模块加载时崩，故放弃 `^3.18.2`）；`engines.dsh >=0.2.1-alpha.2`；`dsh.client.inject` 增加 `@deepseek-ai/dsh-client-ui-plugin-manager`（plugins.item 宿主）。
+
+### 3. 实测（隔离 home，全绿）
+
+- 面板 CRUD（volatile 写 → profile patch 落盘 → cell 热更新 → /panels 秒回）；/use 写凭据 + 建 pi-ai 路由（能力推导 claude text/image + reasoningEfforts 全对）；模型同步、能力 ops（覆盖增删 + 空组清理）、连接测试、看板（SVG）、日志、刷新预置（147 条、delta +11/+12/−6 落盘 + 全面板重放）、删除清理（patch 文档零残留、凭据引用 unset）、**重启后 delta 仍在**。
+- **profile patch 写出的 `reasoningEfforts.off: null` 完好**——0.2.x 写入走 js-yaml（YAML 1.2 core schema），v0.6.1 的 PyYAML 教训不适用于新写路径。
+- 浏览器走查（cdp.mjs 脚本化，中英各一遍）**17/17**：relay 卡片 summary 单行、详情页两 tab、UI 建面板、手风琴、四子 tab、Use 后 active 标签、看板 SVG、能力页预置/平台卡、DOM 零 sk-/令牌明文、删除 Modal「将一并清理」、英文页（经 `settings/mutate` RPC 写 `locale.preference: en` 后 reload）。describe 脱敏直断：wire value 无令牌、`secrets` sidecar 精确报 `panels.<id>.accessToken`。
+- primitives 实证：Button/Switch/Pill/Tag/StateDot/Menu/Modal props 不变；图标全家改名 `*Outline14/16 → *OutlineMedium/Regular`（本插件只用 `IconChevronDownOutlineMedium`）；新增 SettingsForm 族未消费。
+- 走查脚本坑（同 v0.6.1）：cdp.mjs 的 `open` 不退出（ws 保持事件循环）——本轮改为单脚本 `withChrome` 全程驱动；子 tab 与顶层 tab 文案重叠（「模型」⊂「模型能力」），点击必须按 `.relay_panelBody` 作用域 + 精确文本。
+
+### 4. 文档同步
+
+- AGENTS.md §1/§4.1/§4.3/§4.5/§4.6/§6/§8 重写为新模型；README/README.zh 更新宿主要求与入口（设置页 → 「插件」面板）；CHANGELOG 0.7.0。
+
+### 5. v0.7.0 追修（同日）：页面入口与宽度
+
+- **入口迁移**：首版把页面注册到 `plugins.item`——那是 plugin-manager「官方」分组的 items 列表（host-plane 插件如 web-search/subagent 的家），第三方 npm 插件挂上去会以卡片混进官方分组。改为 **`plugins.bundle.config`（keyed slot，`key: CLIENT_MODULE_ID`）**：页面渲染在「已安装」分组里 `dsh-plugin-relay` 包详情页的配置区（`configured = ledger.bundles.has(pkg.name)` 时才渲染，`renderSlot` 传 `{view:'page', entryKey: 包名}`）。实测：官方 17 项无中转站卡，已安装 1 项进详情即见完整两 tab 页面。
+- **宽度自适应**：`relay_section` 沿用旧设置页的 `max-width:760px` 导致设置区比详情页其它内容窄——已删，设置区与包描述/组件区等宽（实测均 960px）。
+- **截图重拍**：assets/ 12 张（6 页 × 中英）全部在 0.2.1 壳上重拍（1440 宽、设置区域垂直居中取景、超高区域顶部对齐；clip 裁在「包含的组件/Components」上沿，避免带入包详情「来源信息」的本机路径）。**走查工具换用 ZCode 自带 browser-use（IAB 后端）全程驱动**：locator/snapshot/evaluate/截图全链路稳定，`settings/mutate` RPC 写 `locale.preference` 切语言；cdp.mjs 保留作脚本化备用。AGENTS §4.5/§6 已同步。
