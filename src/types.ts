@@ -36,6 +36,15 @@ export interface HostContext {
     warn(message: string, ...args: unknown[]): void
     error(message: string, ...args: unknown[]): void
   }
+  /**
+   * Fiber-scoped repeating timers (cordis-plugin-timer, mounted by dsh-base).
+   * NOTE: the mixin accessor THROWS on a context that never injected
+   * `timer` — access is only legal after `ctx.inject(['timer'], …)`; callers
+   * that cannot inject must self-manage via `effect` (see index.ts
+   * `startInterval`).
+   */
+  setInterval?(callback: () => void, delay: number): () => void
+  interval?(callback: () => void, delay: number): () => void
   /** The plugin's own fiber; `entry.options.id` is this instance's entry id. */
   fiber?: {
     entry?: { options?: { id?: string } }
@@ -56,7 +65,6 @@ export interface RelayConfigCells {
   panels: VolatileRef<Record<string, unknown> | undefined>
   capabilityCatalog: VolatileRef<Record<string, unknown> | undefined>
   capabilityOverrides: VolatileRef<Record<string, Record<string, unknown> | undefined> | undefined>
-  capabilityPresetDelta: VolatileRef<unknown>
 }
 
 /** One path-addressed edit (`set` writes / creates, `unset` removes). */

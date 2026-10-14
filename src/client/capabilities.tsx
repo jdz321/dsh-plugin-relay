@@ -9,11 +9,11 @@
  *
  *  - 我的条目: user knowledge entries (namespace `capabilityCatalog`); 新增
  *    opens the editor as a create card on top of the list.
- *  - 预置条目: the preset layer (compiled-in mainstream baseline, rebuilt in
- *    host memory by the single 刷新预置 button INSIDE the collapsed panel —
- *    the refresh also replays into every configured route) in a <details>
- *    with a name filter; Edit expands the row in place and Done saves the
- *    copy as a custom entry (which then overrides the preset).
+ *  - 预置条目: the preset layer (fetched at runtime from models.dev, cached
+ *    in the dsh storage stack, auto-refreshed daily; 刷新预置 inside the
+ *    collapsed panel forces a fetch and replays into every configured route)
+ *    in a <details> with a name filter; Edit expands the row in place and
+ *    Done saves the copy as a custom entry (which then overrides the preset).
  *  - 平台模型: grouped BY PANEL — one subsection per panel route showing the
  *    derived config with a source badge and a coverage indicator; the matched
  *    knowledge-base name renders under the id. Edit expands the row in place;
@@ -68,10 +68,8 @@ export interface CapData {
   catalog?: Record<string, CapDictEntry>
   overrides?: Record<string, Record<string, CapDictEntry>>
   presets?: Record<string, CapDictEntry>
-  /** Compiled-in baseline entry count (v0.6.1 preset status line). */
-  baselineCount?: number
-  /** Persisted refresh delta summary; absent = no delta stored. */
-  presetDelta?: { builtAt: number, added: number, updated: number, removed: number }
+  /** Runtime preset cache status (v0.7.1): fetchedAt absent = not fetched yet. */
+  presetMeta?: { count: number, fetchedAt?: number, lastError?: string }
 }
 
 /** One model row from GET /api/relay/models (price carries the vendor). */
@@ -147,8 +145,6 @@ export function CapabilitiesView({ t, caps, refreshCaps, onMessage }: Capabiliti
   const [overrideClear, setOverrideClear] = useState<{ panel: string, id: string } | null>(null)
   const [presetFilter, setPresetFilter] = useState('')
   const [refreshBusy, setRefreshBusy] = useState(false)
-  const [restoreConfirm, setRestoreConfirm] = useState(false)
-  const [restoreBusy, setRestoreBusy] = useState(false)
   const [vendors, setVendors] = useState<Record<string, Record<string, string>>>({})
   /** Coverage filter (R5): one panel + one source bucket at a time. */
   const [sourceFilter, setSourceFilter] = useState<{ panel: string, source: CoverageBucket } | null>(null)
@@ -283,26 +279,6 @@ export function CapabilitiesView({ t, caps, refreshCaps, onMessage }: Capabiliti
     }
   }
 
-  const restoreBaseline = async (): Promise<void> => {
-    setRestoreBusy(true)
-    try {
-      const body = await apiPost('/api/relay/preset-restore', {})
-      if (body.ok && body.replayed !== false) {
-        onMessage({ ok: true, text: t('capPresetRestored') })
-      } else if (body.ok) {
-        onMessage({ ok: false, text: t('capPresetRestoreReplayFail')(String(body.replayError ?? '?')) })
-      } else {
-        onMessage({ ok: false, text: t('capPresetRestoreFail')(String(body.error ?? '?')) })
-      }
-    } catch (err) {
-      onMessage({ ok: false, text: t('capPresetRestoreFail')(err instanceof Error ? err.message : String(err)) })
-    } finally {
-      setRestoreBusy(false)
-      setRestoreConfirm(false)
-      refreshCaps()
-    }
-  }
-
   const sourceBadge = (view: CapEntryView): JSX.Element => {
     if (view.source === 'override') return <Tag tone="warning">{t('capSourceOverride')}</Tag>
     if (view.source === 'catalog') return <Tag tone="success">{t('capSourceCatalog')}</Tag>
@@ -379,9 +355,12 @@ export function CapabilitiesView({ t, caps, refreshCaps, onMessage }: Capabiliti
                 </summary>
                 <div className="relay_presetBody">
                   <p className="relay_metaLine">
-                    {caps.presetDelta !== undefined && caps.baselineCount !== undefined
-                      ? t('capPresetDeltaLine')(caps.baselineCount, caps.presetDelta.added + caps.presetDelta.updated, caps.presetDelta.removed, monthDay(caps.presetDelta.builtAt))
-                      : t('capPresetBaseline')(caps.baselineCount ?? presetEntries.length)}
+                    {caps.presetMeta?.fetchedAt !== undefined
+                      ? t('capPresetCacheLine')(caps.presetMeta.count, monthDay(caps.presetMeta.fetchedAt))
+                      : t('capPresetNoCache')}
+                    {caps.presetMeta?.lastError !== undefined && (
+                      <span className="relay_capHint">{t('capPresetErrorNote')(caps.presetMeta.lastError)}</span>
+                    )}
                   </p>
                   <p className="relay_metaLine">{t('capPresetIntro')}</p>
                   <div className="relay_presetToolbar">
@@ -391,16 +370,13 @@ export function CapabilitiesView({ t, caps, refreshCaps, onMessage }: Capabiliti
                       value={presetFilter}
                       onChange={(e) => setPresetFilter(e.target.value)}
                     />
-                    <Button variant="ghost" size="sm" disabled={refreshBusy || restoreBusy} onClick={() => { void refreshPreset() }}>
+                    <Button variant="ghost" size="sm" disabled={refreshBusy} onClick={() => { void refreshPreset() }}>
                       {refreshBusy ? t('capPresetRefreshing') : t('capPresetRefresh')}
                     </Button>
-                    {caps.presetDelta !== undefined && (
-                      <Button variant="outline" size="sm" disabled={refreshBusy || restoreBusy} onClick={() => setRestoreConfirm(true)}>
-                        {restoreBusy ? t('capPresetRestoring') : t('capPresetRestore')}
-                      </Button>
-                    )}
                   </div>
-                  {filteredPresets.length === 0 ? <div className="relay_empty">{t('capPresetEmpty')}</div>
+                  {caps.presetMeta?.fetchedAt === undefined
+                    ? <div className="relay_empty">{t('capPresetNoCache')}</div>
+                    : filteredPresets.length === 0 ? <div className="relay_empty">{t('capPresetEmpty')}</div>
                     : filteredPresets.map(([name, entry]) => isOpen('preset', name) ? (
                       <KbCard
                         key={`preset:${name}`}
@@ -537,21 +513,6 @@ export function CapabilitiesView({ t, caps, refreshCaps, onMessage }: Capabiliti
           <>
             <Button variant="outline" onClick={() => setOverrideClear(null)}>{t('cancel')}</Button>
             <Button variant="primary" onClick={() => { void clearOverride() }}>{t('capClearOverride')}</Button>
-          </>
-        )}
-      />
-      <Modal
-        open={restoreConfirm}
-        onClose={() => { if (!restoreBusy) setRestoreConfirm(false) }}
-        title={t('capPresetRestoreTitle')}
-        closeLabel={t('close')}
-        description={t('capPresetRestoreDesc')}
-        footer={(
-          <>
-            <Button variant="outline" disabled={restoreBusy} onClick={() => setRestoreConfirm(false)}>{t('cancel')}</Button>
-            <Button variant="primary" disabled={restoreBusy} onClick={() => { void restoreBaseline() }}>
-              {restoreBusy ? t('capPresetRestoring') : t('capPresetRestore')}
-            </Button>
           </>
         )}
       />

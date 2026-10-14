@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { buildPresetEntries, isNonDialogueModel, openrouterCanonicalNames, PRESET_MAX_AGE_DAYS, PRESET_PROVIDERS, type PresetEntry } from '../src/knowledge-preset.js'
+import { buildPresetEntries, isNonDialogueModel, PRESET_MAX_AGE_DAYS, PRESET_PROVIDERS, type PresetEntry } from '../src/knowledge-preset.js'
 import type { ModelsDevDocument, ModelsDevEntry } from '../src/capabilities.js'
 
 /** Fixed "now" so the release-age window is deterministic: 2026-09-24T00:00:00Z. */
@@ -171,48 +171,6 @@ describe('buildPresetEntries — channel re-registration dedup (drop vs rekey)',
     expect(built.channelDropped).toEqual(['vendor/old-timer'])
     expect(built.rekeyed).toEqual([])
     expect(built.agedOut).toBe(1)
-  })
-})
-
-describe('buildPresetEntries — OpenRouter backstop (injected names, build-time only)', () => {
-  it('admits backstop names through the same window and dialogue filters', () => {
-    const base: ModelsDevDocument = {
-      deepseek: {
-        models: {
-          'deepseek-chat': entry({ release_date: d(400) }),
-        },
-      },
-      'some-aggregator': {
-        models: {
-          // kimi-k3 has NO first-party registration here — only the usage
-          // backstop admits it; the window and dialogue filters still apply.
-          'kimi-k3': entry({ release_date: d(50), limit: { context: 1048576 } }),
-        },
-      },
-    }
-    const built = buildPresetEntries(base, { now: NOW, openrouterNames: ['kimi-k3', 'made-up-model'] })
-    expect(built.openrouterNames).toEqual(['kimi-k3'])
-    expect(built.entries['kimi-k3']?.contextWindow).toBe(1048576)
-    // aged-out whitelist names are not rescued
-    expect(built.entries['deepseek-chat']).toBeUndefined()
-  })
-
-  it('without a backstop the whitelist stands alone (full degradation)', () => {
-    const built = buildPresetEntries(doc(), { now: NOW })
-    expect(built.openrouterNames).toEqual([])
-  })
-})
-
-describe('openrouterCanonicalNames (slug → models.dev name)', () => {
-  it('maps the last path segment exactly or case-folded, dropping unknowns', () => {
-    const document: ModelsDevDocument = {
-      deepseek: { models: { 'deepseek-chat': entry() } },
-      minimax: { models: { 'MiniMax-M3': entry() } },
-    }
-    expect(openrouterCanonicalNames(['deepseek/deepseek-chat', 'minimax/minimax-m3', 'nonsense'], document)).toEqual([
-      'MiniMax-M3',
-      'deepseek-chat',
-    ])
   })
 })
 

@@ -44,10 +44,9 @@ describe('host entry', () => {
     expect(hostEntry.name).toBe('relay')
     expect(typeof hostEntry.apply).toBe('function')
     const config = (hostEntry.Config as unknown as (v: unknown) => Record<string, unknown>)({})
-    // v0.6.1: + capabilityPresetDelta (persisted refresh delta); no legacy
-    // flat route/keyRef base remains (no backward-compat — the plugin is
-    // unreleased)
-    expect(Object.keys(config).sort()).toEqual(['capabilityCatalog', 'capabilityOverrides', 'capabilityPresetDelta', 'panels'])
+    // v0.7.1: the preset layer left the config model entirely (runtime fetch
+    // + dsh storage persistence); three top-level fields remain
+    expect(Object.keys(config).sort()).toEqual(['capabilityCatalog', 'capabilityOverrides', 'panels'])
   })
 
   it('marks the nested panel access token as a secret in the schema envelope', () => {
@@ -122,12 +121,13 @@ describe('built artifacts', () => {
     const imports = [...text.matchAll(/from\s+"([^"]+)"/g)].map((m) => m[1])
     const external = imports.filter((spec) => !spec.startsWith('.'))
     expect(external).toContain('@deepseek-ai/schemastery')
+    expect(external).toContain('@deepseek-ai/dsh-storage')
     for (const spec of external) {
       expect(spec.startsWith('@deepseek-ai/') || spec.startsWith('node:')).toBe(true)
     }
-    // no runtime dependency beyond the declared schemastery + node builtins
+    // no runtime dependency beyond the declared host externals + node builtins
     const npmImports = external.filter((spec) => !spec.startsWith('node:'))
-    expect(npmImports).toEqual(['@deepseek-ai/schemastery'])
+    expect(npmImports.sort()).toEqual(['@deepseek-ai/dsh-storage', '@deepseek-ai/schemastery'])
   })
 })
 
@@ -149,6 +149,7 @@ describe('naming audit (no vendor-specific tokens in the deliverable)', () => {
     'docs/SPEC-0.5.1.md',
     'docs/SPEC-0.6.0.md',
     'docs/SPEC-0.6.1.md',
+    'docs/SPEC-0.7.1.md',
     'docs/PUBLISHING.md',
     'package.json',
   ]

@@ -79,7 +79,6 @@ export class PluginStore implements SettingsService {
         panels: this.cells.panels.get() ?? {},
         capabilityCatalog: this.cells.capabilityCatalog.get() ?? {},
         capabilityOverrides: this.cells.capabilityOverrides.get() ?? {},
-        capabilityPresetDelta: this.cells.capabilityPresetDelta.get(),
       }
     }
     return this.cachedView(ns)?.value

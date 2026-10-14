@@ -525,3 +525,57 @@
 - **入口迁移**：首版把页面注册到 `plugins.item`——那是 plugin-manager「官方」分组的 items 列表（host-plane 插件如 web-search/subagent 的家），第三方 npm 插件挂上去会以卡片混进官方分组。改为 **`plugins.bundle.config`（keyed slot，`key: CLIENT_MODULE_ID`）**：页面渲染在「已安装」分组里 `dsh-plugin-relay` 包详情页的配置区（`configured = ledger.bundles.has(pkg.name)` 时才渲染，`renderSlot` 传 `{view:'page', entryKey: 包名}`）。实测：官方 17 项无中转站卡，已安装 1 项进详情即见完整两 tab 页面。
 - **宽度自适应**：`relay_section` 沿用旧设置页的 `max-width:760px` 导致设置区比详情页其它内容窄——已删，设置区与包描述/组件区等宽（实测均 960px）。
 - **截图重拍**：assets/ 12 张（6 页 × 中英）全部在 0.2.1 壳上重拍（1440 宽、设置区域垂直居中取景、超高区域顶部对齐；clip 裁在「包含的组件/Components」上沿，避免带入包详情「来源信息」的本机路径）。**走查工具换用 ZCode 自带 browser-use（IAB 后端）全程驱动**：locator/snapshot/evaluate/截图全链路稳定，`settings/mutate` RPC 写 `locale.preference` 切语言；cdp.mjs 保留作脚本化备用。AGENTS §4.5/§6 已同步。
+
+---
+
+## 2026-10-14（v0.7.1 — 预置改运行时获取 + 宿主存储栈持久化）
+
+任务书：docs/SPEC-0.7.1.md（持久化方案经操作者复审修订后定稿）。删掉整条编译期预置链路，改为插件运行时从 models.dev 获取同一主流口径，持久化在 dsh 存储栈，默认每 24h 自动刷新。
+
+### 1. storage 栈实证（安装树与 submodule 双核对一致）
+
+- dsh-base patch（170-184 行）挂 `storage`（hub）/`storage-json`（后端，唯一配置 `root: dshHomePath('storages')`）/`storage-domain` 三行，是**每个 base-backed profile 的共享核心**；`session-projection-cache` 与 workspace 是现成消费者。
+- json 后端语义逐条核实：`single` 布局每 unit 一个 `<root>/<unit>.json`（pretty JSON + 尾换行）；写 = 临时文件 + fsync + 原子 rename + 父目录 fsync；root 按需建 `0o700`、文件 `0o600`（实测一致）；**读严格版本匹配**（stamp ≠ descriptor.version 拒 `version-mismatch`，坏文件拒 `malformed-medium`）→ descriptor **version 恒 1 不翻动**；同一 unit 名二次 open 拒绝（句柄 open 一次复用，`preset-store.ts` 串行化 open）；unit 不串行化并发写（本插件单飞链保证至多一条写链）。
+- 服务键：`storageBackendServiceKey('json') === 'storage.backend.json'`，由后端 `ctx.provide` 提供——`ctx.inject(['storage', 'storage.backend.json'], …)` 即「hub 与后端都就绪才回调」，无注册竞速。
+- `@deepseek-ai/dsh-storage` 零 dependencies（仅 cordis peer），按 peer + devDependency（精确 `0.2.1-alpha.2`）引入，tsdown `HOST_EXTERNALS` + build-shape externals 断言同步；运行时零 dependencies 保持。隔离 home link 安装实测：peer 经仓库 node_modules 解析无碍。
+
+### 2. `ctx.setInterval` 验证结论（spec §2/§9 要求入 WORKLOG）
+
+- cordis-plugin-timer 确实由 dsh-base **无条件挂载**（patch 第 24 行），把 `interval`/`setInterval`（deprecated 别名）mixin 到 Context 原型；但 **0.2.1-alpha.2 实测：未 `inject(['timer'])` 的 fiber 上属性直取直接抛错** `cannot get property "timer" without inject`（mixin accessor 对未注入服务是 throw 而非返回 undefined）。
+- 首版 `startInterval` 用 `typeof ctx.interval === 'function'` 守卫——守卫本身来不及生效，走查当场炸出 `settingsRegistrationError`（settings inject 回调中断：store 与事件监听已建好、面板功能未损，但 ticker 没挂上）。修复：try/catch 内**成员调用**探测（成员调用保持 mixin 的 this 绑定，裸函数引用会丢 fiber），失败降级 `ctx.effect(() => { const t = setInterval(…); return () => clearInterval(t) })` 自管——行为等价（timer 的 `interval()` 本身就是 effect 包的 setInterval），随 fiber 卸载自清。
+- 结论：**宿主透传不可直接用，降级方案即正式方案**；types.ts 与 AGENTS §4.7 已按实证改写。
+
+### 3. 实现要点
+
+- `src/preset-store.ts`（新）：`PresetCache = {fetchedAt, entries}`；`normalizePresetCache`（非对象/缺 entries/坏 fetchedAt → null）；`StoragePresetCacheStore` 生产实现（open 一次复用；load 吞 open/读失败 → null + warn 点名 `relay_preset.json` 可手工删除重置；save 透传 `setGlobal`、open 失败上抛由调用方 warn；close 幂等）。
+- `src/refresh.ts` 重写为 `PresetRuntime`：**内存层同步纯读**（`effectivePreset()` 绝不联网）；三触发面（启动检查 = settings+storage 双就绪后调度，存储缺失 10s 宽限降级内存层并照常跑检查；1h 到期巡检 `startInterval`；手动路由绕过到期判定）共享一条**单飞链**；`isCacheStale`（`now - fetchedAt ≥ 24h`，边界含等号）；链内顺序 = 取数 → build → 更新内存层 → await save（失败仅 warn）→ 内容有变才逐面板重放；失败路径记 `presetMeta.lastError`、成功即清。
+- index.ts：config schema 回**三顶层字段**；`preset-restore` 路由删除；`knowledge-refresh` 响应 `{ok,count,fetchedAt,replayed,replayError?}`；capabilities GET 增 `presetMeta:{count,fetchedAt?,lastError?}`；storage inject 装配 + effect 卸载 dispose（关 unit/停 timer/清宽限定时器）。
+- 删除：`knowledge-preset.generated.ts`（147 条/55KB）、`fetch-knowledge-preset.mjs`、`ts-resolver.mjs`、`preset-refresh.yml`、`preset:fetch` script、OpenRouter 兜底（`openrouterCanonicalNames` + `openrouterNames` 入参与 releasedAtAny 全链）。
+- 客户端：预置区三态状态行（缓存「本地缓存 N 条 · 更新于 M-DD」/ 空态「尚未获取——联网后自动获取…」+ lastError 追加「上次更新失败（原因），将自动重试」）；恢复基线按钮/Modal/9 个 locale 键删除；介绍文案改写。**偏离说明**：spec §5.2 的失败提示带「（M-DD · 原因摘要）」日期，但 §5.1 的 presetMeta 形状无失败时间戳字段——按 §5.1 契约实现为不带日期（避免误导性的日期借用）。
+
+### 4. 走查实测（隔离 home + mock 面板，0.2.1-alpha.2，中英各一轮）
+
+- **落盘**：`<home>/storages/relay_preset.json` 实测形状 `{unit:{name:'relay_preset',version:1}, global:{fetchedAt, entries}, tables:{}}`，0600/目录 0700；profile patch 只写 panels/pi-ai 路由，**零 preset 字段进 settings**。
+- **重启保留 + 24h 免重取**：重启后 fetchedAt 逐位不变（1791953002567）、148 条原样（hydrate 自介质，未再取数）；**删除介质重启重建**：open 视为空 unit → 启动检查立即取数，新 fetchedAt + 文件重出。
+- **启动检查实证**：全新 home 首启（无任何手动操作）即完成获取落盘——settings+storage 双就绪触发。
+- **旧 delta 惰性**：向 profile patch 植入 `capabilityPresetDelta`（0.7.0 形状）重启——无加载错误（settingsRegistrationError null）、describe 只投影三字段、残留 delta 的 `old-model` 条目不混入预置层。
+- **失败路径**：死代理（`https_proxy=http://127.0.0.1:9`）+ 无介质 → presetMeta `{count:0, lastError:"proxy CONNECT failed…"}`，页面空态 + 失败追加提示；手动刷新 502 + 可读错误。恢复代理重启后自愈。
+- **免重放**：内容未变的手动刷新 fetchedAt 翻新落盘、`replayed:true` 且无重放错误（skip 分支单测断言 settings 写次数为 0）。
+- **手动刷新路由**：`{ok:true,count:148,fetchedAt,replayed:true}`，无 delta 字段。
+- **describe 脱敏**：relay 视图零令牌明文；secrets sidecar 含 `panels.mock.accessToken`（0.6.1 RPC envelope 定案沿用）。
+- **回归**：面板手风琴/账户行懒加载/keys Use（6 模型同步，`kimi-k3` 路由条目带完整派生能力、`reasoningEfforts.off:null` 完好）/模型三计价/看板双轴 SVG/日志筛选；能力页匹配徽标（mock 6 模型 coverage 预置 1 · 知识库 0 · 覆盖 0 · 未配置 5；`kimi-k3` L0 命中）、覆盖率分段点击过滤（切 1 行/清 6 行）、maxTokens 32K 覆盖完成即存（patch 落 32768）→ 清除回落。
+- **截图**：能力页中英各 1 张按 0.7.0 配方重拍（1440 宽、暗色、设置区居中、裁 Components 上沿；zh 903px / en 917px）。
+- 走查工具坑（新记）：IAB 每次重启 dsh 后侧栏可能折叠——「插件」rail 按钮点了没反应，先点 Open sidebar 展开；面板行头按钮 textContent 是两个 span 拼接（无空格），前缀文本匹配会落空，用 `.relay_panelMain` 选择器。
+
+### 5. 真实账号只读复核（spec §7.3）
+
+- 管线外置直算（git 取回 ts-resolver + 0.7.0 基线一次性放 .tmp；连接与 key 只读自真实 home，令牌零打印）：真实面板现行生效 key 可调 **9 个模型 id，对 0.7.0 基线与 0.7.1 运行时层均 9/9 全 L0 精确命中，零回归**（0.6.0 时代的「83 ids / 67 命中」是当时 key 分组的更大模型面）。
+- 条目构成：0.7.1 运行时 **148 条** vs 0.7.0 基线 147 条——**+1（gemini-4-argon，models.dev live 漂移）**、**0 移除**、1 条值变；OpenRouter 兜底移除未造成条目消失（上一轮基线生成时兜底未注入或恰与第一方重合）。
+- 知识库/覆盖/连接/模型同步不受预置空窗影响（本轮无预置期手工验证过的路径全部照常）。
+
+### 6. 质量门与收尾
+
+- vitest **225 通过 / 0 失败**（19 文件；新增 preset-store 13 项 + refresh 重写 14 项，删 delta 矩阵/openrouter fixture/restore 用例；L0-L5 全矩阵与其余既有覆盖不降）；typecheck/build 全绿；client 产物 102.45KB（≤350KB 断言）。
+- build-shape：config keys 断言三顶层字段；宿主 ESM externals = schemastery + dsh-storage；专名哨兵审计加 SPEC-0.7.1.md。
+- npm pack：8 files（lib×2 + cordis.patch.yml + README + CHANGELOG + LICENSE + package.json），无 src/scripts 泄漏。
+- 文档：AGENTS（§1/§2/§3/§4.7 新节/§6/§8 v0.7.1）、README 中英（预置章节重写 + 首次使用需联网 + 惰性残留说明 + Compatibility 修正到 0.2.1——0.7.0 遗留的 0.1.5-rc.2 陈旧版本号一并纠正）、CHANGELOG 0.7.1、PUBLISHING §6/§7（weekly workflow/基线维护整段撤除）。

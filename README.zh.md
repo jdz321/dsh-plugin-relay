@@ -13,7 +13,7 @@
 - **模型**（按面板）— 当前生效 key 可调用的模型与价格，覆盖面板家族的全部三种计价口径：按量美元价（$/1M tokens）、按次固定价、经典倍率价（模型倍率 × 分组倍率）。刷新列表时自动同步给 dsh，运行中的会话立即生效。
 - **数据看板**（按面板）— 余额、今日消耗、累计数据，以及手写 SVG 按模型消耗堆叠图：金额 / Token 两种口径、7 / 14 / 30 天范围切换、图例点击显隐；四张汇总卡固定一行。面板仅保留近期用量桶，稀疏数据有可读空态。
 - **使用日志**（按面板）— 面板请求日志：页头用量 / RPM / TPM 统计，时间 / 模型 / 密钥 / 分组筛选（点「查询」生效），用量列含缓存与推理 token 小字及首字耗时。
-- **模型能力** — 由**预置知识库**（编译期从 [models.dev](https://models.dev) **主流模型**生成——仅收录第一方作者厂商、近 1 年内发布、对话类模型；可一键联网刷新——按钮就在预置折叠面板内）、你的自定义条目与按面板按 id 的覆盖配置三层组成。三个分区都采用**原地展开编辑**（对齐官方「模型」页行↔卡交互）——一次展开一张卡，「完成」即保存，没有全局保存按钮；上下文窗口与**输出上限**支持 `128K` / `1M` 简写（1024 进制）并实时显示换算。匹配按层级进行：覆盖 → 知识库（精确 → 大小写折叠 → 剥变体后缀 → 版本分隔符互换 → 唯一变体补全 → 人工别名），近似命中标注「近似」，匹配到的知识库名显示在模型 id 下方。平台模型分区按面板分组，每组带覆盖率指示。
+- **模型能力** — 由**预置知识库**（**运行时**从 [models.dev](https://models.dev) 联网获取**主流模型**——仅收录第一方作者厂商、近 1 年内发布、对话类模型；默认每 24 小时自动更新一次，结果持久化在 dsh 的本地存储；「刷新预置」按钮可立即更新）、你的自定义条目与按面板按 id 的覆盖配置三层组成。三个分区都采用**原地展开编辑**（对齐官方「模型」页行↔卡交互）——一次展开一张卡，「完成」即保存，没有全局保存按钮；上下文窗口与**输出上限**支持 `128K` / `1M` 简写（1024 进制）并实时显示换算。匹配按层级进行：覆盖 → 知识库（精确 → 大小写折叠 → 剥变体后缀 → 版本分隔符互换 → 唯一变体补全 → 人工别名），近似命中标注「近似」，匹配到的知识库名显示在模型 id 下方。平台模型分区按面板分组，每组带覆盖率指示。
 - **多面板** — 每套面板是独立的 pi-ai 提供方（`<面板>/v1` 上的 `openai-completions`，各自独立的凭据引用），dsh 会话同时看到所有面板的模型（按提供方分组命名）。删除面板会一并清理它的路由、能力覆盖与凭据引用；全局知识库不受影响。
 - **热生效** — 凭据、模型目录、能力配置全部经 dsh settings/credentials 服务写入；运行中的会话在下一次请求时立即应用，无需重启。插件**不再管理默认模型**——模型请在 dsh 侧自行选择。
 
@@ -46,25 +46,25 @@ dsh plugin --profile web add /path/to/dsh-plugin-relay
 2. 点击面板行进入详情页。在「API Keys」页新建 key（或对既有 key 点「使用」）：插件把 key 写入 dsh 凭据存储、建立该面板的模型路由并同步模型目录。需要几套就接几套——它们同时生效。
 3. 在「模型」页查看每个模型的价格；刷新列表会让 dsh 的路由目录始终与 key 的实际可调用集合一致。
 4. 「数据看板」「使用日志」随时查看余额与消耗；两者只读面板的报表接口。
-5. 「模型能力」页（主页）：预置条目默认折叠、可按名搜索，需要微调时一键复制进「我的条目」；「刷新预置」单按钮联网取最新值，并自动重新应用到每个面板的模型目录。上下文窗口与输出上限 `131072`、`128K`、`1M` 写法等价。仅当个别面板模型 id 需要不同取值时才编辑对应卡片——「完成」即刻保存为该面板的覆盖配置。
+5. 「模型能力」页（主页）：预置条目默认折叠、可按名搜索，需要微调时一键复制进「我的条目」；预置首次使用时自动联网获取（此后每天自动更新一次），「刷新预置」立即取最新值并自动重新应用到每个面板的模型目录。上下文窗口与输出上限 `131072`、`128K`、`1M` 写法等价。仅当个别面板模型 id 需要不同取值时才编辑对应卡片——「完成」即刻保存为该面板的覆盖配置。
 
 ## 工作原理
 
-- 插件注册 `relay` 设置 namespace：`panels` 字典（每套面板的连接字段；访问令牌是 secret 字段，接口层自动脱敏）、全局知识库与按面板分组的覆盖配置；并在 dsh 的浏览器信任围栏内提供 `/api/relay/{state,panels,panels-create,panels-delete,account,connection-test,keys,keys-create,keys-update,keys-delete,use,models,capabilities,model-info,knowledge-refresh,preset-restore,dashboard,logs,logs-stat,logs-meta}` 路由。
+- 插件注册 `relay` 设置 namespace：`panels` 字典（每套面板的连接字段；访问令牌是 secret 字段，接口层自动脱敏）、全局知识库与按面板分组的覆盖配置；并在 dsh 的浏览器信任围栏内提供 `/api/relay/{state,panels,panels-create,panels-delete,account,connection-test,keys,keys-create,keys-update,keys-delete,use,models,capabilities,model-info,knowledge-refresh,dashboard,logs,logs-stat,logs-meta}` 路由。
 - 每套面板首次切换 key 时，插件把该面板的 pi-ai 路由配置（`api: openai-completions`、`baseURL: <面板>/v1`、`apiKeyEnv: RELAY_API_KEY_<面板名大写>`、合并后的模型目录）写入 dsh 设置——dsh 对路由热加载，无需重启。API key 本身按请求从该面板的凭据引用解析。
 - 目录同步按模型 id 合并：存活模型的手工修正全部保留；key 已不可调用的模型会被移除，dsh 只会提供 key 真正能调用的模型。路由条目上的能力字段是**派生状态**：每次同步、每次能力保存、每次预置刷新都按「覆盖 → 知识库（自定义优先，其次预置层）」重放；只有插件持有配置的字段才会被写——你在官方「模型」页对未配置 id 的手工修改不会被冲掉。
 - 能力保存是**定向操作**（`catalogSet` / `catalogDelete` / `overrideSet` / `overrideDelete`，覆盖操作携带所属面板），逐条落到 settings 路径操作——删除真实生效，不会被深合并掩盖——随后对受影响的路由目录做修订守卫重放。
-- 预置知识库由 `npm run preset:fetch` 在构建期生成（models.dev 第一方白名单、365 天发布窗口、剔除非对话模型、渠道重复登记去重；可选 OpenRouter 用量兜底——设置 `OPENROUTER_API_KEY`）并提交进源码；「刷新预置」按钮在宿主内存里用实时 models.dev 重建——并重放到全部已配置路由——重启后有意回落到编译基线。
+- 预置知识库**运行时获取**：沿用项目一贯的主流口径（models.dev 第一方白名单、365 天发布窗口、剔除非对话模型、渠道重复登记去重）。插件默认**每 24 小时自动刷新一次**（启动检查 + 每小时的到期巡检），「刷新预置」立即强制获取；整份缓存（`{fetchedAt, entries}`）持久化在 **dsh 的本地存储栈**（`<DSH_HOME>/storages/relay_preset.json`，由宿主 json 后端原子发布）——重启保留，24 小时内重启不重取。预置数据不再写入设置/profile patch；删除该存储文件即重置为「尚未获取」。
 
 ## 安全说明
 
 - 每套面板的访问令牌存于 secret 设置字段（所有接口面自动脱敏，包括嵌套在 panels 字典内）；API key 只写入服务端凭据存储（`.credentials.yaml`，0600），从不回传浏览器——创建 key 的响应由服务端剥离明文，也不提供「复制 key」类功能。
 - 插件全部路由位于 dsh 浏览器信任围栏内（同源 + 签名会话），未认证请求返回 401。
-- models.dev 查询在宿主侧进行（带缓存与单飞合并），浏览器不直连第三方；预置生成脚本不触碰任何中转站面板与凭据。
+- models.dev 查询在宿主侧进行（带缓存与单飞合并），浏览器不直连第三方；预置获取不触碰任何中转站面板、不引入任何凭据。
 
 ## 兼容性
 
-- 要求 dsh ≥ **0.2.1-alpha.2**（`engines.dsh` 强制）——0.2.x 起插件配置页宿主为「插件」面板（`plugins.item` slot）、插件状态落在 entry config（profile patch），本插件不兼容 0.1.x 宿主线。`@deepseek-ai/dsh-client-ui-primitives` 由宿主供给自己编译的版本，插件不以它为运行时依赖——仅作为**精确锁版到宿主对应版本**的 devDependency 提供类型（与 `@deepseek-ai/schemastery` 一同随 dsh 锁步升级）。
+- 要求 dsh ≥ **0.2.1-alpha.2**（`engines.dsh` 强制）——0.2.x 起插件配置页宿主为「插件」面板（第三方包挂 `plugins.bundle.config` slot）、插件状态落在 entry config（profile patch），本插件不兼容 0.1.x 宿主线。`@deepseek-ai/dsh-client-ui-primitives` 与 `@deepseek-ai/dsh-storage` 由宿主供给（后者为 peer 依赖——dsh-base 为每个 base-backed profile 挂载存储 hub 与 json 后端；无存储栈的 profile 上插件降级为纯内存预置缓存）。primitives 不作为运行时依赖——仅作为**精确锁版到宿主对应版本**的 devDependency 提供类型（与 `@deepseek-ai/schemastery` 一同随 dsh 锁步升级）。
 - 浏览器验收覆盖 dsh **0.2.1-alpha.2**（隔离 home 实装 + headless 走查，中英双语各一遍）。本插件消费的 primitives 子集（Button / Switch / Pill / Tag / StateDot / Menu / Modal + `IconChevronDownOutlineMedium`）与该宿主版本逐一对证。
 - 插件有意只消费该稳定子集，并在每次升级 dsh 开发依赖后重跑一轮浏览器走查（见 docs/PUBLISHING.md）。
 
@@ -73,8 +73,9 @@ dsh plugin --profile web add /path/to/dsh-plugin-relay
 - 管理 API 需要配对的用户 ID（每套面板手动填写一次；见面板「个人中心」）。
 - 面板与知识库都未报告模型容量时，按 id 前缀启发式推断 context window / 最大输出，未识别的 id 回退 131072 / 8192。
 - 知识库匹配每一层都要求全等（大小写折叠、剥后缀、版本分隔符互换、变体补全），歧义即放弃；渠道命名的面板特有模型（如 `grok-video`）按设计不匹配。
-- 预置基线只收录主流模型——第一方厂商近 1 年内发布的对话模型。售卖更老或小众模型的面板会回落「未配置」；可自建条目或等「刷新预置」（同一套规则）。
-- 预置刷新以增量形式持久化在编译基线之上；插件升级带新基线时旧增量仍会叠加（它表达「用户上次刷新的意图」），极端情况下可能与新基线不一致——「恢复基线」是一键出口。
+- 预置只收录主流模型——第一方厂商近 1 年内发布的对话模型。售卖更老或小众模型的面板会回落「未配置」；可自建条目或点「刷新预置」（同一套规则）。
+- **首次使用需联网获取一次**：全新安装（或存储文件被删除）在第一次 models.dev 获取成功前没有预置条目；知识库、覆盖配置、连接与模型同步不受影响。离线新装会保持该状态，直到宿主能访问 models.dev（走宿主的代理环境）。
+- 从 ≤0.7.0 升级：profile patch 里可能残留旧的 `capabilityPresetDelta` 键。新 schema 不再声明它，宿主按**惰性残留**处理——不报错、不投影、不可写；可无视，介意者手工编辑 profile patch 删除该键。
 - 面板名称创建后不可修改（它是路由键、凭据引用与覆盖分组的名字）；改名 = 删除重建。
 - 面板对日志明细与看板桶只保留近期数据；更早的数据属于面板保留策略，不是插件缺陷。
 - models.dev 是第三方快照——未收录的模型与 toggle 型推理以手动配置兜底。
@@ -83,13 +84,12 @@ dsh plugin --profile web add /path/to/dsh-plugin-relay
 ## 开发
 
 ```sh
-npm install        # @deepseek-ai/dsh 为 devDependency；运行时零 dependencies（schemastery 为 peer）
+npm install        # @deepseek-ai/dsh 为 devDependency；运行时零 dependencies（schemastery 与 dsh-storage 为 peer）
 npm run typecheck  # tsc --noEmit
 npm run build      # tsdown → lib/index.js（宿主 ESM）+ lib/client.js（浏览器包裹产物）
 npm test           # vitest：单测 + mock 中转站面板，不触碰真实 dsh home
 npm start          # 开发启动：dsh web --port 3098，使用本仓库 .dsh-home
 npm start -- --no-open   # 同上，但不自动打开系统浏览器
-npm run preset:fetch    # 重新生成 src/knowledge-preset.generated.ts（models.dev 主流基线；OpenRouter 兜底可选）
 ```
 
 版本历史见 [CHANGELOG.md](CHANGELOG.md)；开发笔记（工作日志、任务书、发布清单）见 [docs/](docs)；dsh 集成语义见 [AGENTS.md](AGENTS.md)。

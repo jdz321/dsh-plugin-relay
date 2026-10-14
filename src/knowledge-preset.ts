@@ -1,10 +1,10 @@
 /**
- * Knowledge-preset construction, shared verbatim by the build-time script
- * (`npm run preset:fetch`) and the runtime 「刷新预置」 route — both must
- * produce the same layer, so the logic lives once here.
+ * Knowledge-preset construction, shared by the runtime refresh chain (and the
+ * tests) — one place defines the mainstream layer's meaning.
  *
- * v0.6.0 policy — the baseline is the MODELS.DEV MAINSTREAM only; the relay
- * panel is no longer a baseline source (it is only ever the matched object):
+ * v0.7.1 policy — the preset is built AT RUNTIME from the MODELS.DEV
+ * MAINSTREAM feed (the relay panel is never a preset source; it is only ever
+ * the matched object):
  *
  *  1. whitelist: every model under the curated first-party author providers
  *     below (api.json keys verified against the live feed);
@@ -15,10 +15,7 @@
  *  4. channel re-registrations dedupe: names decorated with an `@channel`
  *     suffix, a `vendor/` prefix, or a `-maas` suffix drop when the stripped
  *     name already exists in the set, and rekey to the bare name when it does
- *     not (keeps MaaS-only entries like `deepseek-v3.2-maas` → `deepseek-v3.2`);
- *  5. optional OpenRouter usage backstop (build-time only, key-gated): the
- *     caller maps ranking permaslugs onto models.dev names and passes them in;
- *     they run through the same window and non-dialogue filters.
+ *     not (keeps MaaS-only entries like `deepseek-v3.2-maas` → `deepseek-v3.2`).
  *
  * Admitted names map through mapModelsDevEntry + mergeSuggestions (per name
  * across ALL providers — same-name entries union, largest known context window
@@ -44,8 +41,6 @@ export interface PresetBuildResult {
   channelDropped: string[]
   /** Decorated names rekeyed to their bare form (no bare entry existed). */
   rekeyed: Array<{ from: string, to: string }>
-  /** Names admitted through the OpenRouter rankings backstop. */
-  openrouterNames: string[]
 }
 
 /**
@@ -53,8 +48,8 @@ export interface PresetBuildResult {
  * the live feed (2026-09-27: `moonshotai`/`xai`/`zai` are the real spellings,
  * the vendor-brand forms are not; `-cn` mirrors exist for the Chinese houses).
  * Aggregator providers (llmgateway, 302ai, ...) host far more ids but are not
- * model authors and say nothing about mainstream. Adjusting this list =
- * edit + re-run preset:fetch.
+ * model authors and say nothing about mainstream. Adjusting this list is a
+ * source edit (the runtime picks it up on the next refresh).
  */
 export const PRESET_PROVIDERS = [
   'openai',
@@ -120,15 +115,14 @@ function stripAllDecorations(name: string): string {
 
 export function buildPresetEntries(
   doc: ModelsDevDocument,
-  options: { now?: number, openrouterNames?: readonly string[] } = {},
+  options: { now?: number } = {},
 ): PresetBuildResult {
   // name → merged suggestion / raw modalities, across ALL providers of the
   // document. Suggestions and modalities describe the model itself, so any
   // provider's entry contributes. RELEASE DATES are treated differently:
   // aggregator entries carry garbage dates (`1970-01-01`, guessed months),
   // so a whitelist name's date comes from the first-party providers only
-  // (the author is authoritative); all-provider dates back only the
-  // OpenRouter names, which by construction have no first-party entry.
+  // (the author is authoritative).
   const mergedByName = new Map<string, ReturnType<typeof mergeSuggestions>>()
   const modalitiesByName = new Map<string, { input?: string[], output?: string[] }>()
   for (const models of Object.values(doc)) {
@@ -147,15 +141,6 @@ export function buildPresetEntries(
         rawModalities.output = [...new Set([...(rawModalities.output ?? []), ...entry.modalities.output])]
       }
       modalitiesByName.set(name, rawModalities)
-    }
-  }
-  const releasedAtAny = new Map<string, number | null>()
-  for (const models of Object.values(doc)) {
-    if (!models?.models) continue
-    for (const [name, entry] of Object.entries(models.models)) {
-      const date = Date.parse(String(entry.release_date ?? ''))
-      const previousDate = releasedAtAny.get(name)
-      releasedAtAny.set(name, Number.isFinite(date) && (!(previousDate ?? 0) || (previousDate ?? 0) < date) ? date : previousDate ?? null)
     }
   }
   const releasedAtFirstParty = new Map<string, number | null>()
@@ -232,21 +217,6 @@ export function buildPresetEntries(
   const now = options.now ?? Date.now()
   const cutoff = now - PRESET_MAX_AGE_DAYS * 86_400_000
 
-  const openrouterNames: string[] = []
-  for (const name of options.openrouterNames ?? []) {
-    if (typeof name !== 'string' || !name.trim()) continue
-    // the backstop never invents names: a slug that maps to nothing in the
-    // document has no data, no date, and no business in the preset
-    if (!finalDate.has(name) && (releasedAtAny.has(name) || mergedByName.has(name))) {
-      finalDate.set(name, releasedAtAny.get(name) ?? null)
-      const suggestion = mergedByName.get(name)
-      if (suggestion) finalSuggestion.set(name, suggestion)
-      const rawModalities = modalitiesByName.get(name)
-      if (rawModalities) finalModalities.set(name, rawModalities)
-      openrouterNames.push(name)
-    }
-  }
-
   // Window + non-dialogue filters over the final candidate set.
   const wanted = [...finalDate.keys()]
   const nonDialogueNames: string[] = []
@@ -283,30 +253,5 @@ export function buildPresetEntries(
     nonDialogue: nonDialogueNames.length,
     channelDropped: channelDropped.sort(),
     rekeyed,
-    openrouterNames: openrouterNames.sort(),
   }
-}
-
-/**
- * Map OpenRouter ranking slugs onto models.dev canonical names (exact or
- * case-fold; slugs like `deepseek/deepseek-chat` reduce to their last path
- * segment first). Unknown slugs are dropped — the backstop never invents
- * names the document does not describe.
- */
-export function openrouterCanonicalNames(slugs: readonly string[], doc: ModelsDevDocument): string[] {
-  const names = new Set<string>()
-  for (const models of Object.values(doc)) {
-    if (!models?.models) continue
-    for (const name of Object.keys(models.models)) names.add(name)
-  }
-  const folded = new Map<string, string>()
-  for (const name of names) folded.set(name.toLowerCase(), name)
-  const out = new Set<string>()
-  for (const slug of slugs) {
-    const last = String(slug).trim().split('/').pop() ?? ''
-    if (!last) continue
-    if (names.has(last)) out.add(last)
-    else if (folded.has(last.toLowerCase())) out.add(folded.get(last.toLowerCase())!)
-  }
-  return [...out].sort()
 }

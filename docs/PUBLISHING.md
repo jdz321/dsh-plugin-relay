@@ -59,18 +59,16 @@ npm publish        # prepublishOnly 会先跑 typecheck + build
 ## 6. 宿主兼容（每次升级 dsh 开发依赖后必做）
 
 - [ ] `npm install @deepseek-ai/dsh@latest` 后**必须重跑一轮浏览器走查**：插件 UI 消费的 primitives（Button/Switch/Pill/Tag/StateDot/Menu/Modal）由宿主在运行时供给自己的编译版本，npm 侧测试覆盖不到视觉与行为。
-- [ ] **锁步升级类型包**：`@deepseek-ai/dsh-client-ui-primitives` 以 devDependency 精确锁版供类型（当前 `0.1.5-rc.2`），升级 dsh 开发依赖时同步改成宿主对应版本；npm 的 `latest` 标签停在 rc.1 属 prerelease 不挪 tag 的语义，锁版请用精确版本号。
-- [ ] 只消费「稳定子集」（见 AGENTS §4.6）：0.1.7 新增的 settings-form 套件、SegmentedControl、Checkbox 等**不引入**，等 npm 宿主线跟上后另立任务评估。
-- [ ] 走查通过的宿主版本记进 README「Compatibility」小节与本清单（当前实测：0.1.5-rc.2、0.1.5-rc.3；子集 diff 实证兼容至 0.1.7-rc.1）。
-- [ ] `engines.dsh` 下限只在「模块表缺少所需键」时才动（当前 `>=0.1.5-rc.2`，即首个携带 primitives 模块表的宿主）。
+- [ ] **锁步升级类型包**：`@deepseek-ai/dsh-client-ui-primitives` 与 `@deepseek-ai/dsh-storage`（v0.7.1 起，peer）以 devDependency 精确锁版（当前均为 `0.2.1-alpha.2`），升级 dsh 开发依赖时同步改成宿主对应版本；schemastery peer（`~3.18.5-alpha.1`）同班次锁步（`.volatile()` 元数据必须与宿主同源）。
+- [ ] 只消费「稳定子集」（见 AGENTS §4.6）：宿主新增件不引入，升级后逐项复核。
+- [ ] 走查通过的宿主版本记进 README「Compatibility / 兼容性」小节与本清单（当前实测：0.2.1-alpha.2）。
+- [ ] `engines.dsh` 下限只在「宿主能力缺口」时才动（当前 `>=0.2.1-alpha.2`，即 entry-config 模型 + 存储栈 + 同班次 primitives 的宿主线）。
 - [ ] 若未来 primitives 出现破坏性漂移：先在 `MenuSelect` 等包装组件内做能力探测收敛爆点，不在业务代码里散落 try/catch。
 
-## 7. 预置知识库基线（维护节奏）
+## 7. 预置知识库（v0.7.1 起随版本零维护）
 
-- [ ] **每周自动**：`preset-refresh` workflow（每 7 天，cron 在 workflow 顶部可改）跑 `preset:fetch` 与已提交基线 diff，有漂移自动开 PR 供审阅——**不自动合并**。v0.6.0 起基线是**纯 models.dev 主流口径**（第一方白名单 / 365 天窗口 / 非对话剔除 / 渠道去重），workflow diff 即纯数据漂移，无过渡期噪声。
-- [ ] 主流模型发布潮后也可手动跑 `npm run preset:fetch`（只读 models.dev，全程无凭据、不触碰任何面板），diff 产物 `src/knowledge-preset.generated.ts` 并随代码一起提交。
-- [ ] 生成文件头部只允许 models.dev 日期与计数——**不得**出现面板地址、账号等任何身份信息。
-- [ ] v0.6.1 起用户的「刷新预置」结果以 `capabilityPresetDelta` 增量持久化并**叠加在新基线上**（用户刷新意图优先）；README「Known limitations」已记录该权衡，「恢复基线」是一键出口——发版说明无需额外动作。
+- [ ] **没有编译基线了**：预置由插件在用户侧运行时从 models.dev 获取（每 24h 自动一次 + 手动「刷新预置」），持久化在各用户自己的 `<DSH_HOME>/storages/relay_preset.json`。发版不携带预置数据——weekly workflow、codegen 脚本、基线漂移 PR 已全部移除。
+- [ ] 主流口径调整（白名单/窗口/非对话/去重规则）= 改 `src/knowledge-preset.ts` 随版本发布；用户侧下一次刷新即按新口径重建（删除本地 `storages/relay_preset.json` 可立即重置）。
 
 ## 8. 发版节奏（后续版本，自动化后；commit 由开发会话执行，push 一律由维护者确认审计后手动完成）
 

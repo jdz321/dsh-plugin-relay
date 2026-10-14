@@ -9,9 +9,15 @@
  * per-key model pricing with catalog sync, the capability knowledge base with
  * route replay, connection testing, usage dashboard, and usage logs. Works
  * with any new-api family relay panel; several panels live at once.
+ *
+ * Since v0.7.1 the model-capability PRESET layer is fetched at runtime from
+ * models.dev (PresetRuntime in refresh.ts), persisted in the dsh storage
+ * stack (`relay_preset` unit, preset-store.ts), and refreshed automatically
+ * once a day — there is no compiled-in baseline anymore.
  */
 
 import Schema from '@deepseek-ai/schemastery'
+import type { KvFacet } from '@deepseek-ai/dsh-storage'
 
 import { AccountCache } from './account.js'
 import { applyCapabilityOps } from './capability-ops.js'
@@ -23,20 +29,9 @@ import {
   deriveCapabilityFor,
   knowledgeForPanel,
   normalizeKnowledgeConfig,
-  normalizePresetDelta,
-  resolvePreset,
-  summarizePresetDelta,
   type CatalogEntry,
   type KnowledgeConfig,
 } from './knowledge.js'
-import { buildPresetEntries } from './knowledge-preset.js'
-import { KNOWLEDGE_PRESET } from './knowledge-preset.generated.js'
-import {
-  formatQuota,
-  keySummary,
-  planSwitch,
-  type SwitchPlan,
-} from './plan.js'
 import {
   missingPanelSetup,
   panelSummaries,
@@ -45,8 +40,15 @@ import {
   type PanelConfig,
 } from './panels.js'
 import { createPanel, deletePanel, PanelRequestError } from './panels-ops.js'
+import {
+  formatQuota,
+  keySummary,
+  planSwitch,
+  type SwitchPlan,
+} from './plan.js'
 import { groupRatioOf, priceEntry } from './pricing.js'
-import { refreshPresetAndReplay, restorePresetBaseline } from './refresh.js'
+import { PresetRuntime } from './refresh.js'
+import { StoragePresetCacheStore, STORAGE_JSON_SERVICE_KEY } from './preset-store.js'
 import { ensureRouteProfile, storedRouteProfile, syncRouteCatalog } from './route-config.js'
 import { DEFAULT_MODEL_NS, PI_AI_NS, PluginStore } from './store.js'
 import type { CredentialsService, HostContext, HostSettingsService, RelayConfigCells, SchemaType } from './types.js'
@@ -61,13 +63,6 @@ const CapabilityEntrySchema = Schema.object({
   reasoning: Schema.union([Schema.boolean(), Schema.array(Schema.string())]),
   contextWindow: Schema.number(),
   maxTokens: Schema.number(),
-})
-
-/** The persisted refresh delta against the compiled preset baseline. */
-const PresetDeltaSchema = Schema.object({
-  builtAt: Schema.number(),
-  removed: Schema.array(Schema.string()),
-  changed: Schema.dict(CapabilityEntrySchema),
 })
 
 /**
@@ -101,7 +96,6 @@ const configShape = {
   panels: Schema.dict(PanelSchema).volatile(),
   capabilityCatalog: Schema.dict(CapabilityEntrySchema).volatile(),
   capabilityOverrides: Schema.dict(Schema.dict(CapabilityEntrySchema)).volatile(),
-  capabilityPresetDelta: PresetDeltaSchema.volatile(),
 }
 
 export const Config = Schema.object(configShape) as unknown as SchemaType<Record<string, unknown>>
@@ -112,6 +106,8 @@ let credentialsService: CredentialsService | null = null
 let hostLogger: HostContext['logger'] | null = null
 /** The store facade over the host service + volatile cells (null until wired). */
 let store: PluginStore | null = null
+/** The runtime preset layer: memory cache + storage persistence + triggers. */
+let presets: PresetRuntime | null = null
 
 /** Diagnostic: last settings-registration failure, surfaced via /state. */
 let settingsRegistrationError: string | null = null
@@ -167,18 +163,12 @@ function currentKnowledge(): KnowledgeConfig {
 }
 
 /**
- * The preset delta persisted by the last 「刷新预置」 (v0.6.1). Read from the
- * volatile cell — its value is absent (undefined) until the first refresh
- * persists one, which normalizePresetDelta reports as absent.
+ * The effective preset layer — the runtime's in-memory cache of the last
+ * models.dev fetch (empty until the startup hydration / first fetch lands).
+ * Synchronous and offline by contract; never fetches, never awaits.
  */
-function storedPresetDelta() {
-  const raw = store?.get(NAMESPACE) as Record<string, unknown> | undefined
-  return normalizePresetDelta(raw?.capabilityPresetDelta)
-}
-
-/** The effective preset layer: compiled baseline + the persisted delta. */
 function effectivePreset(): Record<string, CatalogEntry> {
-  return resolvePreset(KNOWLEDGE_PRESET, storedPresetDelta())
+  return presets?.effectivePreset() ?? {}
 }
 
 /** User dicts + the effective preset layer, as every derivation consumes. */
@@ -370,7 +360,7 @@ function capabilitiesView() {
       models: capabilityModelsView(panel),
     }
   })
-  const delta = storedPresetDelta()
+  const meta = presets?.presetMeta() ?? { count: 0 }
   return {
     ok: true,
     configured: panels.some((panel) => panel.configured),
@@ -378,8 +368,7 @@ function capabilitiesView() {
     catalog: knowledge.capabilityCatalog,
     overrides: knowledge.capabilityOverrides,
     presets: effectivePreset(),
-    baselineCount: Object.keys(KNOWLEDGE_PRESET).length,
-    ...(delta !== undefined ? { presetDelta: summarizePresetDelta(KNOWLEDGE_PRESET, delta) } : {}),
+    presetMeta: meta,
   }
 }
 
@@ -415,17 +404,65 @@ async function handlePanelsMutation(request: Request, action: 'create' | 'delete
 }
 
 /**
+ * A fiber-scoped repeating timer. dsh-base mounts cordis-plugin-timer, whose
+ * `interval`/`setInterval` mixins auto-dispose with the owning fiber — but
+ * the mixin accessor THROWS on a context that never injected `timer`
+ * (`cannot get property "timer" without inject`, verified live on
+ * 0.2.1-alpha.2), so the probe is guarded and hosts without access fall back
+ * to a self-managed interval under `ctx.effect` (same teardown semantics —
+ * cordis-plugin-timer's interval() is itself an effect-wrapped setInterval).
+ */
+function startInterval(ctx: HostContext, callback: () => void, delay: number): () => void {
+  const viaMixin = (): (() => void) | undefined => {
+    const timer = ctx as HostContext & Record<string, unknown>
+    for (const method of ['interval', 'setInterval'] as const) {
+      try {
+        // Member access on the context proxy — the mixin getter binds the
+        // method to the caller's fiber; a bare function reference would not.
+        const disposed = (timer[method] as (cb: () => void, d: number) => () => void)(callback, delay)
+        return typeof disposed === 'function' ? disposed : undefined
+      } catch {
+        /* not injectable on this fiber — try the next name / fall through */
+      }
+    }
+    return undefined
+  }
+  const dispose = viaMixin()
+  if (dispose) return dispose
+  let handle: ReturnType<typeof setInterval> | undefined
+  ctx.effect(() => {
+    handle = setInterval(callback, delay)
+    return () => {
+      if (handle !== undefined) clearInterval(handle)
+    }
+  })
+  return () => {
+    if (handle !== undefined) clearInterval(handle)
+  }
+}
+
+/**
  * Wire the plugin to the composition: read the entry's volatile config cells,
  * disable the host's auto-generated settings page in favor of the client's
- * own, serve the /api/relay/* routes, and keep the route profiles mirrored
- * after hot config changes. Every registration dies with this plugin's fiber,
- * so removing the bundle row unmounts everything.
+ * own, serve the /api/relay/* routes, keep the route profiles mirrored after
+ * hot config changes, and run the runtime preset layer (memory + dsh storage
+ * persistence + the daily refresh triggers). Every registration dies with
+ * this plugin's fiber, so removing the bundle row unmounts everything.
  */
 export function apply(ctx: HostContext, config: unknown): void {
   hostLogger = ctx.logger
   // The resolved entry config: volatile fields arrive as live cells that the
   // loader updates in place on every hot (no-reload) write.
   const cells = config as RelayConfigCells
+  // The runtime preset layer. All deps resolve lazily; the startup refresh
+  // fires only once the settings store AND the persistent cache are wired.
+  presets = new PresetRuntime({
+    fetchDoc: () => modelsDev.refresh(),
+    settings: () => store,
+    panels: currentPanels,
+    knowledge: resolvedKnowledge,
+    logger: hostLogger ?? undefined,
+  })
   ctx.inject(['settings', 'credentials'], (services) => {
     const captured = services as unknown as { settings: HostSettingsService, credentials: CredentialsService }
     settingsService = captured.settings
@@ -441,12 +478,39 @@ export function apply(ctx: HostContext, config: unknown): void {
       ctx.on('settings/document-updated', ((ns: unknown) => {
         store?.invalidateForeign(String(ns))
       }) as never)
-      // Hot config changes (panel CRUD, capability saves, preset refreshes,
-      // page edits) — mirror the pi-ai route profiles afterward.
+      // Hot config changes (panel CRUD, capability saves, page edits) —
+      // mirror the pi-ai route profiles afterward.
       ctx.on('loader/volatile-update', (() => scheduleRouteMirror()) as never)
+      // Settings side of the preset runtime is ready: schedule the startup
+      // staleness check and the hourly ticker that keeps a long-running host
+      // on the daily cadence.
+      presets?.noteSettingsReady()
+      presets?.startPeriodicCheck((callback, delay) => startInterval(ctx, callback, delay))
     } catch (err) {
       settingsRegistrationError = errorText(err)
     }
+  })
+
+  // Persistent preset cache via the dsh storage stack: dsh-base mounts the
+  // storage hub and the json backend for every base-backed profile. The
+  // second key is the backend's lifecycle service — the callback runs only
+  // once both resolve. On profiles without the stack the inject never fires
+  // and the runtime degrades to its memory-only layer (grace-timer info).
+  ctx.inject(['storage', STORAGE_JSON_SERVICE_KEY], (services) => {
+    const captured = services as unknown as {
+      storage?: { backend?: { get(name: string): { kv?: KvFacet } | undefined } }
+    }
+    const kv = captured.storage?.backend?.get('json')?.kv
+    if (!kv || !presets) {
+      hostLogger?.warn('relay: json 存储后端不可用,预置缓存仅使用内存层')
+      return
+    }
+    const cacheStore = new StoragePresetCacheStore(kv, hostLogger ?? undefined)
+    // The unit handle closes with this fiber's teardown.
+    ctx.effect(() => () => {
+      presets?.dispose()
+    })
+    void presets.attach(cacheStore)
   })
 
   ctx.inject(['connection'], (services) => {
@@ -589,38 +653,20 @@ export function apply(ctx: HostContext, config: unknown): void {
     })
 
     // 刷新预置: force-fetch models.dev (bypassing the TTL cache), rebuild the
-    // preset layer with the same mainstream rules as `npm run preset:fetch`,
-    // PERSIST the difference against the compiled baseline as the namespace's
-    // `capabilityPresetDelta` (one awaited mutate — the delta survives
-    // restarts; 恢复基线 is the way back), and replay the derivation over
-    // every configured panel route.
+    // preset layer with the same mainstream rules, update the in-memory layer,
+    // persist the whole cache through the dsh storage stack (awaited — the
+    // client refetches the moment this response lands), and replay the
+    // derivation over every configured panel route. A background refresh
+    // already in flight piggybacks the same single-flight chain.
     route(connection, ctx, 'knowledge-refresh', ['POST'], async () => {
-      if (!store) return json({ ok: false, error: 'settings service unavailable' }, 500)
+      if (!presets) return json({ ok: false, error: 'settings service unavailable' }, 500)
       let result
       try {
-        result = await refreshPresetAndReplay({
-          fetchDoc: () => modelsDev.refresh(),
-          settings: store,
-          panels: currentPanels(),
-          baseline: KNOWLEDGE_PRESET,
-          knowledge: resolvedKnowledge,
-        })
+        result = await presets.refresh()
       } catch (err) {
         return json({ ok: false, error: `models.dev 获取失败: ${err instanceof Error ? err.message : String(err)}` }, 502)
       }
-      hostLogger?.info(`relay: knowledge preset refreshed (${result.count} entries, delta +${result.delta.added + result.delta.updated} / -${result.delta.removed})`)
-      return json({ ok: true, ...result })
-    })
-
-    // 恢复基线: drop the persisted preset delta (back to the compiled-in
-    // baseline) and replay the derivation over every configured panel route.
-    route(connection, ctx, 'preset-restore', ['POST'], async () => {
-      if (!store) return json({ ok: false, error: 'settings service unavailable' }, 500)
-      const result = await restorePresetBaseline({
-        settings: store,
-        panels: currentPanels(),
-        knowledge: resolvedKnowledge,
-      })
+      hostLogger?.info(`relay: knowledge preset refreshed (${result.count} entries, fetchedAt ${new Date(result.fetchedAt).toISOString()})`)
       return json({ ok: true, ...result })
     })
 

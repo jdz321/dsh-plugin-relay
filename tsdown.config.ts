@@ -28,6 +28,7 @@ const CLIENT_EXTERNALS = [
 /** Node-side runtime imports provided by the Harness host, never bundled. */
 const HOST_EXTERNALS = [
   '@deepseek-ai/schemastery',
+  '@deepseek-ai/dsh-storage',
 ] as const
 
 export default defineConfig([
